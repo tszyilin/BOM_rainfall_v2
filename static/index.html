@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOM Rainfall Downloader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+
+<link rel="stylesheet" href="/static/style.css">
+<!-- Anti-flash: apply stored dark preference before first paint -->
+<script>if(localStorage.getItem("rf-dark")==="1")document.documentElement.dataset.theme="dark";</script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header id="header">
+    <div class="logo">
+      <!-- Rain drop SVG -->
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2 C12 2, 5 10, 5 15 a7 7 0 0 0 14 0 C19 10, 12 2, 12 2 Z"
+              fill="rgba(255,255,255,0.25)" stroke="white" stroke-width="1.8"/>
+        <path d="M8.5 16 Q10 18.5 12 17" stroke="white" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+      </svg>
+      BOM Rainfall Downloader
+    </div>
+
+    <button class="header-btn" id="favs-toggle-btn" title="Show favourites only">
+      ⭐ Favourites
+    </button>
+    <button class="header-btn" id="dark-toggle-btn" onclick="toggleDarkMode()" title="Toggle dark / light mode">
+      🌙 Dark
+    </button>
+    <button class="header-btn" onclick="window.open('/docs','_blank')" title="API docs">
+      📡 API Docs
+    </button>
+  </header>
+
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside id="sidebar">
+
+    <!-- Search by name -->
+    <div class="sidebar-section stn-search-section">
+      <div class="sidebar-section-title">🔍 Search by Name</div>
+      <div class="stn-search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input id="station-search" type="text" placeholder="Station name…" autocomplete="off">
+        <div id="search-results-dropdown"></div>
+      </div>
+    </div>
+
+    <!-- Search by station number -->
+    <div class="sidebar-section stn-search-section">
+      <div class="sidebar-section-title">🔢 Search by Station Number</div>
+      <div class="stn-id-wrap">
+        <input id="stn-id-input" type="text" placeholder="e.g. 066011" autocomplete="off" maxlength="8" inputmode="numeric">
+        <button id="stn-id-go-btn">Go</button>
+      </div>
+      <div id="stn-id-status"></div>
+    </div>
+
+    <!-- Location search -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">📍 Search by Location</div>
+      <div id="loc-search-row">
+        <div class="loc-input-wrap">
+          <input id="loc-input" type="text" placeholder="Suburb, postcode…" autocomplete="off">
+          <div id="loc-suggestions"></div>
+        </div>
+        <button id="loc-btn">Go</button>
+      </div>
+      <div id="loc-status"></div>
+      <div class="range-row" style="margin-top:8px">
+        <label>Radius</label>
+        <input type="range" id="radius-slider" min="25" max="500" step="25" value="100">
+        <span class="range-val"><span id="radius-val">100</span> km</span>
+      </div>
+    </div>
+
+    <!-- Favourites -->
+    <div class="sidebar-section" id="fav-section">
+      <div class="sidebar-section-title">
+        ⭐ Favourites
+        <span id="fav-count" style="font-weight:400;color:var(--text-muted)"></span>
+      </div>
+      <div id="fav-list">
+        <div style="font-size:.8em;color:var(--text-muted);padding:0 0 10px">No favourites yet — click ⭐ on a station.</div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Sidebar Sizer ──────────────────────────────────────── -->
+  <div class="panel-sizer" id="sidebar-sizer">
+    <button class="sizer-btn" id="sidebar-collapse-btn" title="Collapse sidebar">«</button>
+  </div>
+
+  <!-- ── Main ──────────────────────────────────────────────── -->
+  <main id="main">
+    <div id="map-wrapper">
+      <div id="map"></div>
+    </div>
+
+    <!-- ── Detail Panel ─────────────────────────────────── -->
+    <div id="detail-panel">
+      <div class="panel-header">
+        <div class="panel-info">
+          <div class="panel-name-row">
+            <span class="panel-stn-id" id="panel-stn-id"></span>
+            <div class="panel-stn-name" id="panel-name">—</div>
+            <a class="panel-bom-link" id="panel-bom-link" href="#" target="_blank"
+               rel="noopener noreferrer" title="View on BOM website" style="display:none">↗ BOM</a>
+          </div>
+          <div class="panel-stn-meta" id="panel-meta"></div>
+        </div>
+        <button class="panel-fav-btn" id="panel-fav-btn" title="Add to favourites">☆ Favourite</button>
+        <button class="panel-compare-btn" id="panel-compare-btn" title="Add to comparison">⚖ Compare</button>
+        <button class="panel-close" id="panel-close-btn" title="Close">✕</button>
+      </div>
+
+      <div class="panel-tabs">
+        <button class="tab-btn active" data-tab="daily">Daily</button>
+        <button class="tab-btn" data-tab="monthly">Monthly</button>
+        <button class="tab-btn" data-tab="annual">Annual</button>
+        <button class="tab-btn" data-tab="missing">Missing</button>
+        <button class="tab-btn" data-tab="download">Download</button>
+      </div>
+
+      <div class="panel-body">
+
+        <!-- Daily tab -->
+        <div class="tab-content active" id="tab-daily">
+          <div class="chart-controls">
+            <label>Chart</label>
+            <div class="chart-type-toggle">
+              <button class="active" data-type="bar"  id="ctype-bar">📊 Bar</button>
+              <button data-type="line" id="ctype-line">📈 Line</button>
+            </div>
+            <div class="yr-range-ctrl">
+              <label>Year</label>
+              <select id="yr-start"></select>
+              <span>–</span>
+              <select id="yr-end"></select>
+            </div>
+            <div class="yr-range-ctrl">
+              <label>Single year</label>
+              <select id="yr-single"><option value="">All</option></select>
+            </div>
+          </div>
+
+          <!-- IFD + Custom ref lines panel -->
+          <div class="ifd-ref-panel">
+            <div class="ifd-expander">
+              <div class="expander-header" id="ifd-header" onclick="toggleExpander('ifd')">
+                <span id="ifd-header-text">📐 IFD Reference Lines (BOM 2016)</span>
+                <span class="expander-arrow">▶</span>
+              </div>
+              <div class="expander-body" id="ifd-body">
+                <div id="ifd-content">
+                  <div style="font-size:.78em;color:var(--text-muted)">Select a station to load IFD data.</div>
+                </div>
+              </div>
+            </div>
+            <div class="ref-expander">
+              <div class="expander-header" id="ref-header" onclick="toggleExpander('ref')">
+                <span id="ref-header-text">📏 Custom Reference Lines</span>
+                <span class="expander-arrow">▶</span>
+              </div>
+              <div class="expander-body" id="ref-body">
+                <div class="ref-add-row">
+                  <input type="number" id="ref-val" placeholder="mm" min="0" step="5" title="Depth (mm)">
+                  <input type="text"   id="ref-lbl" placeholder="Label" title="Line label">
+                  <input type="color"  id="ref-col" value="#e74c3c" title="Colour">
+                  <select id="ref-style" title="Line style" class="ref-select">
+                    <option value="dash">– – dash</option>
+                    <option value="dot">·· dot</option>
+                    <option value="solid">— solid</option>
+                    <option value="longdash">—— long</option>
+                    <option value="dashdot">–· mix</option>
+                  </select>
+                  <select id="ref-width" title="Line width" class="ref-select">
+                    <option value="1">1 px</option>
+                    <option value="2" selected>2 px</option>
+                    <option value="3">3 px</option>
+                  </select>
+                  <button class="ref-add-btn" onclick="addRefLine()">＋ Add</button>
+                </div>
+                <div class="ref-line-list" id="ref-line-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-area" id="daily-chart-area">
+            <div class="empty-msg"><div class="big-icon">🌧️</div>Select a station on the map</div>
+          </div>
+        </div>
+
+        <!-- Monthly tab -->
+        <div class="tab-content" id="tab-monthly">
+          <div class="chart-controls">
+            <label>Year</label>
+            <select class="ctrl-select" id="monthly-yr-select"></select>
+            <label style="margin-left:8px">View</label>
+            <div class="chart-type-toggle">
+              <button class="active" data-mview="year" id="mview-year">By Month</button>
+              <button data-mview="allyears" id="mview-allyears">All Years</button>
+            </div>
+            <div id="monthly-month-ctrl" style="display:none">
+              <label>Month</label>
+              <select class="ctrl-select" id="monthly-month-select">
+                <option value="1">Jan</option><option value="2">Feb</option>
+                <option value="3">Mar</option><option value="4">Apr</option>
+                <option value="5">May</option><option value="6">Jun</option>
+                <option value="7">Jul</option><option value="8">Aug</option>
+                <option value="9">Sep</option><option value="10">Oct</option>
+                <option value="11">Nov</option><option value="12">Dec</option>
+              </select>
+            </div>
+          </div>
+          <div class="chart-area" id="monthly-chart-area">
+            <div class="empty-msg"><div class="big-icon">📅</div>Select a station</div>
+          </div>
+        </div>
+
+        <!-- Annual tab -->
+        <div class="tab-content" id="tab-annual">
+          <div class="chart-area" id="annual-chart-area">
+            <div class="empty-msg"><div class="big-icon">📆</div>Select a station</div>
+          </div>
+        </div>
+
+        <!-- Missing days tab -->
+        <div class="tab-content" id="tab-missing">
+          <div id="missing-table-area" class="missing-tab-body">
+            <div class="empty-msg"><div class="big-icon">📋</div>Select a station</div>
+          </div>
+        </div>
+
+        <!-- Download tab -->
+        <div class="tab-content" id="tab-download">
+          <div class="download-tab-body">
+
+            <!-- ── Single-station ── -->
+            <div class="dl-card">
+              <div class="dl-section-hd">⬇ This Station</div>
+              <div class="dl-option-row">
+                <input type="checkbox" id="dl-distribute" checked>
+                <label for="dl-distribute">Distribute accumulated rainfall across days</label>
+              </div>
+              <div class="dl-btn-row">
+                <button class="dl-btn" id="dl-csv-btn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                  </svg>
+                  CSV
+                </button>
+                <button class="dl-btn outline" id="dl-xlsx-btn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                  </svg>
+                  XLSX (3 sheets)
+                </button>
+              </div>
+              <div id="dl-status" style="font-size:.8em;color:var(--text-muted);margin-top:4px"></div>
+            </div>
+
+          </div>
+        </div>
+
+      </div><!-- panel-body -->
+    </div><!-- detail-panel -->
+  </main>
+
+  <!-- ── Right Panel Sizer ─────────────────────────────────── -->
+  <div class="panel-sizer" id="rpanel-sizer">
+    <button class="sizer-btn" id="rpanel-collapse-btn" title="Collapse right panel">»</button>
+  </div>
+
+  <!-- ── Right Panel ────────────────────────────────────────── -->
+  <aside id="right-panel">
+
+    <!-- Tabs -->
+    <div class="rp-tabs">
+      <button class="rp-tab-btn active" data-rptab="compare">⚖ Compare</button>
+      <button class="rp-tab-btn" data-rptab="batch">📦 Batch</button>
+    </div>
+
+    <!-- Compare tab -->
+    <div class="rp-body active" id="rptab-compare">
+      <div class="rp-section">
+        <button class="rp-add-btn" id="rp-add-btn" onclick="addToComparison()" disabled>
+          ＋ Add current station
+        </button>
+        <div class="compare-view-row" id="compare-view-row" style="display:none">
+          <div class="rp-type-toggle">
+            <button class="active" id="cv-annual" onclick="setCompareView('annual')">Annual</button>
+            <button id="cv-monthly" onclick="setCompareView('monthly')">Monthly</button>
+          </div>
+          <select id="cv-month-sel" class="ctrl-select" style="display:none;font-size:.78em">
+            <option value="1">Jan</option><option value="2">Feb</option>
+            <option value="3">Mar</option><option value="4">Apr</option>
+            <option value="5">May</option><option value="6">Jun</option>
+            <option value="7">Jul</option><option value="8">Aug</option>
+            <option value="9">Sep</option><option value="10">Oct</option>
+            <option value="11">Nov</option><option value="12">Dec</option>
+          </select>
+          <button class="rp-clear-btn" onclick="clearComparison()">Clear all</button>
+        </div>
+      </div>
+      <div id="compare-list" class="compare-list">
+        <div class="rp-empty">Select a station then click Add</div>
+      </div>
+      <div id="compare-chart-area" class="rp-chart-area">
+        <div class="empty-msg"><div class="big-icon">⚖️</div>Add 2+ stations</div>
+      </div>
+    </div>
+
+    <!-- Batch tab -->
+    <div class="rp-body" id="rptab-batch">
+      <div class="rp-batch-scroll">
+
+        <!-- Source selector -->
+        <div>
+          <div class="dl-section-hd" style="margin-bottom:8px">Station Source</div>
+          <div class="batch-source-row">
+            <label class="batch-radio">
+              <input type="radio" name="batch-src" value="favs" checked> ⭐ Favourites
+              <span class="batch-count" id="batch-fav-count"></span>
+            </label>
+            <label class="batch-radio">
+              <input type="radio" name="batch-src" value="custom"> ✏ Custom IDs
+            </label>
+          </div>
+          <textarea id="batch-custom-ids" class="batch-ids-textarea"
+            placeholder="One station ID per line, e.g.&#10;066011&#10;066037&#10;086071"
+            style="display:none;margin-top:6px"></textarea>
+        </div>
+
+        <!-- Format -->
+        <div>
+          <div class="dl-section-hd" style="margin-bottom:8px">Format</div>
+          <div class="batch-format-row">
+            <label class="batch-radio">
+              <input type="radio" name="batch-fmt" value="zip" checked>
+              ZIP of CSVs <span style="color:var(--text-muted);font-size:.8em">(up to 50)</span>
+            </label>
+            <label class="batch-radio">
+              <input type="radio" name="batch-fmt" value="xlsx">
+              XLSX <span style="color:var(--text-muted);font-size:.8em">(up to 20)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Options -->
+        <div class="dl-option-row">
+          <input type="checkbox" id="batch-distribute" checked>
+          <label for="batch-distribute">Distribute accumulated rainfall</label>
+        </div>
+
+        <!-- Start button -->
+        <button class="dl-btn" id="batch-start-btn" onclick="startBatchDownload()" style="width:100%;justify-content:center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Download Batch
+        </button>
+
+        <!-- Progress -->
+        <div id="batch-progress" style="display:none">
+          <div class="batch-progress-label" id="batch-progress-label">Fetching…</div>
+          <div class="batch-progress-bar-wrap">
+            <div class="batch-progress-bar" id="batch-progress-bar" style="width:0%"></div>
+          </div>
+          <div id="batch-error-list" class="batch-error-list"></div>
+        </div>
+
+      </div>
+    </div>
+
+  </aside>
+
+</div><!-- app -->
+
+<!-- ── Scripts ──────────────────────────────────────────── -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
