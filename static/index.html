@@ -126,7 +126,7 @@
           <div class="panel-stn-meta" id="panel-meta"></div>
         </div>
         <button class="panel-fav-btn" id="panel-fav-btn" title="Add to favourites">☆ Favourite</button>
-        <button class="panel-compare-btn" id="panel-compare-btn" title="Add to comparison">⚖ Compare</button>
+        <button class="panel-compare-btn" id="panel-compare-btn" title="Add to comparison" style="display:none">⚖ Compare</button>
         <button class="panel-close" id="panel-close-btn" title="Close">✕</button>
       </div>
 
@@ -138,7 +138,7 @@
         <button class="tab-btn" data-tab="ams">AMS</button>
         <button class="tab-btn" data-tab="ifd-chart">IFD</button>
         <button class="tab-btn" data-tab="cumulative">Cumulative</button>
-        <button class="tab-btn" data-tab="download">Download</button>
+        <button class="tab-btn" onclick="openDownloadModal()">Download</button>
       </div>
 
       <div class="panel-body">
@@ -279,47 +279,27 @@
           </div>
         </div>
 
-        <!-- Download tab -->
-        <div class="tab-content" id="tab-download">
-          <div class="download-tab-body">
-            <div class="dl-card">
-              <div class="dl-section-hd">⬇ Export — This Station</div>
-              <div class="dl-option-row">
-                <input type="checkbox" id="dl-distribute" checked>
-                <label for="dl-distribute">Distribute accumulated rainfall across days</label>
-              </div>
-              <button class="dl-btn" style="margin-top:8px" onclick="openDownloadModal()">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
-                Choose what to download…
-              </button>
-              <div id="dl-status" style="font-size:.8em;color:var(--text-muted);margin-top:6px"></div>
-            </div>
-          </div>
-        </div>
 
       </div><!-- panel-body -->
     </div><!-- detail-panel -->
   </main>
 
-  <!-- ── Right Panel Sizer ─────────────────────────────────── -->
-  <div class="panel-sizer" id="rpanel-sizer">
+  <!-- ── Right Panel Sizer — disabled ─────────────────────── -->
+  <div class="panel-sizer" id="rpanel-sizer" style="display:none">
     <button class="sizer-btn" id="rpanel-collapse-btn" title="Collapse right panel">»</button>
   </div>
 
-  <!-- ── Right Panel ────────────────────────────────────────── -->
-  <aside id="right-panel">
+  <!-- ── Right Panel — disabled ───────────────────────────── -->
+  <aside id="right-panel" style="display:none">
 
     <!-- Tabs -->
-    <div class="rp-tabs">
+    <div class="rp-tabs" style="display:none">
       <button class="rp-tab-btn active" data-rptab="compare">⚖ Compare</button>
-      <button class="rp-tab-btn" data-rptab="batch">📦 Batch</button>
+      <button class="rp-tab-btn" data-rptab="batch" style="display:none">📦 Batch</button>
     </div>
 
-    <!-- Compare tab -->
-    <div class="rp-body active" id="rptab-compare">
+    <!-- Compare tab — disabled, planned for next version -->
+    <div class="rp-body active" id="rptab-compare" style="display:none">
       <div class="rp-section">
         <button class="rp-add-btn" id="rp-add-btn" onclick="addToComparison()" disabled>
           ＋ Add current station
@@ -349,7 +329,7 @@
     </div>
 
     <!-- Batch tab -->
-    <div class="rp-body" id="rptab-batch">
+    <div class="rp-body" id="rptab-batch" style="display:none">
       <div class="rp-batch-scroll">
 
         <!-- Source selector -->
@@ -421,11 +401,32 @@
       <button class="dl-modal-close" onclick="closeDownloadModal()">✕</button>
     </div>
     <div class="dl-modal-body">
-      <div class="dl-modal-section">What to export:</div>
+
+      <!-- Format toggle -->
+      <div class="dl-modal-section">Format:</div>
+      <div class="dl-format-toggle">
+        <label class="dl-format-opt">
+          <input type="radio" name="dl-format" value="csv" checked onchange="updateDlBtn()">
+          <div class="dl-format-card">
+            <span class="dl-format-name">CSV</span>
+            <span class="dl-format-desc">Separate file per selection</span>
+          </div>
+        </label>
+        <label class="dl-format-opt">
+          <input type="radio" name="dl-format" value="xlsx" onchange="updateDlBtn()">
+          <div class="dl-format-card">
+            <span class="dl-format-name">XLSX</span>
+            <span class="dl-format-desc">All selections as sheets</span>
+          </div>
+        </label>
+      </div>
+
+      <!-- Sheet selection -->
+      <div class="dl-modal-section" style="margin-top:10px">What to include:</div>
       <label class="dl-modal-row"><input type="checkbox" id="dlm-daily"   checked> Daily rainfall</label>
-      <label class="dl-modal-row"><input type="checkbox" id="dlm-monthly" checked> Monthly pivot table</label>
-      <label class="dl-modal-row"><input type="checkbox" id="dlm-annual"  checked> Annual pivot table</label>
-      <label class="dl-modal-row"><input type="checkbox" id="dlm-missing" checked> Missing days pivot</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-monthly" checked> Monthly summary</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-annual"  checked> Annual summary</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-missing" checked> Missing days</label>
       <label class="dl-modal-row">
         <input type="checkbox" id="dlm-ams" checked> AMS (Annual Maximum Series)
         <span style="color:var(--text-muted);font-size:.8em;margin-left:6px">
@@ -433,10 +434,14 @@
             style="width:44px;padding:1px 4px;font-size:.8em;border:1px solid var(--border);border-radius:3px;background:var(--bg)"> days/yr
         </span>
       </label>
-      <label class="dl-modal-row"><input type="checkbox" id="dlm-ifd"> IFD table (24-hr, BOM 2016)</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-ifd"> IFD table (BOM 2016)</label>
+
+      <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px">
+        <label class="dl-modal-row"><input type="checkbox" id="dl-distribute" checked> Distribute accumulated readings</label>
+      </div>
     </div>
     <div class="dl-modal-footer">
-      <button class="dl-btn" id="dl-modal-go-btn" onclick="triggerModalDownloads()">Download CSVs</button>
+      <button class="dl-btn" id="dl-modal-go-btn" onclick="triggerModalDownloads()">Download CSV</button>
       <button class="dl-btn outline" onclick="closeDownloadModal()">Cancel</button>
     </div>
   </div>

@@ -599,8 +599,22 @@ _IFD_PREFERRED = [
 ]
 
 
+def _within_ifd_coverage(lat: float, lon: float) -> bool:
+    """Return True if coordinates fall within BOM Revised IFD 2016 coverage.
+    Coverage is Australian mainland + Tasmania; excludes PNG, Vanuatu, Pacific islands.
+    """
+    return -44.5 <= lat <= -9.0 and 112.0 <= lon <= 154.0
+
+
 @app.get("/api/ifd", summary="BOM Revised IFD 2016 design rainfall (24-hour)")
 def get_ifd(lat: float, lon: float):
+    if not _within_ifd_coverage(lat, lon):
+        raise HTTPException(
+            404,
+            f"Location ({lat:.3f}, {lon:.3f}) is outside BOM Revised IFD 2016 coverage area "
+            "(Australian mainland and Tasmania only)."
+        )
+
     key = (round(lat, 3), round(lon, 3))
     if key in _ifd_cache:
         cached = _ifd_cache[key]
@@ -940,11 +954,86 @@ def export_csv(
     )
 
 
+# ── XLSX sheet helpers ────────────────────────────────────────────────────────
+def _df_missing_days(df: pd.DataFrame, rain_col: str = "Rainfall_mm") -> pd.DataFrame:
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    if df.empty:
+        return pd.DataFrame()
+    MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    recorded = (
+        df.dropna(subset=[rain_col])
+        .groupby([df["Date"].dt.year, df["Date"].dt.month]).size()
+    )
+    fy, fm = df["Date"].min().year, df["Date"].min().month
+    ly, lm = df["Date"].max().year, df["Date"].max().month
+    rows = []
+    for yr in sorted(df["Date"].dt.year.unique()):
+        row: dict = {"Year": int(yr)}
+        total = 0
+        for mo in range(1, 13):
+            if yr == fy and mo < fm: row[MO[mo-1]] = None; continue
+            if yr == ly and mo > lm: row[MO[mo-1]] = None; continue
+            exp  = (pd.Timestamp(yr, mo, 1) + pd.offsets.MonthEnd(1)).day
+            pres = recorded.get((yr, mo), 0)
+            miss = max(0, exp - pres)
+            row[MO[mo-1]] = miss
+            total += miss
+        row["Total_Missing"] = total
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _df_ams(df: pd.DataFrame, rain_col: str = "Rainfall_mm", max_missing: int = 30) -> pd.DataFrame:
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    if df.empty:
+        return pd.DataFrame()
+    recorded = (
+        df.dropna(subset=[rain_col])
+        .groupby([df["Date"].dt.year, df["Date"].dt.month]).size()
+    )
+    fy, fm = df["Date"].min().year, df["Date"].min().month
+    ly, lm = df["Date"].max().year, df["Date"].max().month
+    rows = []
+    for yr, grp in df.groupby(df["Date"].dt.year):
+        miss = 0
+        for mo in range(1, 13):
+            if yr == fy and mo < fm: continue
+            if yr == ly and mo > lm: continue
+            exp  = (pd.Timestamp(yr, mo, 1) + pd.offsets.MonthEnd(1)).day
+            pres = recorded.get((yr, mo), 0)
+            miss += max(0, exp - pres)
+        valid = grp[rain_col].dropna()
+        if valid.empty: continue
+        rows.append({"Year": int(yr), "Annual_Max_mm": round(float(valid.max()), 1),
+                     "Missing_Days": int(miss), "Excluded": miss > max_missing})
+    included = sorted([r for r in rows if not r["Excluded"]], key=lambda r: r["Annual_Max_mm"], reverse=True)
+    n = len(included)
+    for i, r in enumerate(included):
+        r.update({"Rank": i+1, "ARI_years": round((n+1)/(i+1), 1), "AEP": round((i+1)/(n+1), 3)})
+    rank_map = {r["Year"]: r for r in included}
+    for r in rows:
+        if r["Year"] not in rank_map:
+            r.update({"Rank": None, "ARI_years": None, "AEP": None})
+    df_out = pd.DataFrame(sorted(rows, key=lambda r: r["Year"]))
+    for col in ["Rank", "ARI_years", "AEP"]:
+        if col not in df_out.columns:
+            df_out[col] = None
+    return df_out[["Year","Annual_Max_mm","Rank","ARI_years","AEP","Missing_Days","Excluded"]]
+
+
 # ── GET /api/export/{station_id}/xlsx ────────────────────────────────────────
 @app.get("/api/export/{station_id}/xlsx", summary="Download station XLSX")
 def export_xlsx(
-    station_id: str,
-    distribute: bool = Query(True),
+    station_id:    str,
+    distribute:    bool          = Query(True),
+    sheets:        str           = Query("daily,monthly,annual"),
+    ams_threshold: int           = Query(30),
+    lat:           Optional[float] = Query(None),
+    lon:           Optional[float] = Query(None),
 ):
     station_id = station_id.strip().zfill(6)
     try:
@@ -952,65 +1041,80 @@ def export_xlsx(
     except RuntimeError as e:
         raise HTTPException(400, str(e))
 
+    requested = {s.strip().lower() for s in sheets.split(",")}
+
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
-
-    # Monthly summary
-    monthly = (
-        df.groupby([df["Date"].dt.year.rename("Year"), df["Date"].dt.month.rename("Month")])[rain_col]
-        .sum()
-        .round(1)
-        .reset_index()
-    )
-    month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
-                   7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
-    monthly["Month_Name"] = monthly["Month"].map(month_names)
-
-    # Annual summary
-    annual = (
-        df.groupby(df["Date"].dt.year.rename("Year"))[rain_col]
-        .agg(Total_mm="sum", Missing_Days=lambda x: int(x.isna().sum()))
-        .round(1)
-        .reset_index()
-    )
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         wb = writer.book
-        hdr_fmt = wb.add_format({
-            "bold": True, "bg_color": "#1a6eb5",
-            "font_color": "#ffffff", "border": 1,
-        })
+        hdr_fmt = wb.add_format({"bold": True, "bg_color": "#1a6eb5",
+                                  "font_color": "#ffffff", "border": 1})
 
-        # Sheet 1: Daily Rainfall
-        daily_out = df[["Date", rain_col]].copy()
-        daily_out["Date"] = daily_out["Date"].dt.strftime("%Y-%m-%d")
-        daily_out.to_excel(writer, index=False, sheet_name="Daily Rainfall")
-        ws = writer.sheets["Daily Rainfall"]
-        for ci, cn in enumerate(daily_out.columns):
-            ws.write(0, ci, cn, hdr_fmt)
-        ws.set_column(0, 0, 12)
-        ws.set_column(1, 1, 14)
-        ws.freeze_panes(1, 0)
+        def _write_sheet(data_df: pd.DataFrame, name: str, col_w: list | None = None):
+            data_df.to_excel(writer, index=False, sheet_name=name)
+            ws = writer.sheets[name]
+            for ci, cn in enumerate(data_df.columns):
+                ws.write(0, ci, cn, hdr_fmt)
+            if col_w:
+                for ci, w in enumerate(col_w):
+                    ws.set_column(ci, ci, w)
+            ws.freeze_panes(1, 0)
 
-        # Sheet 2: Monthly Summary
-        monthly_out = monthly[["Year", "Month_Name", rain_col]].rename(
-            columns={"Month_Name": "Month", rain_col: "Total_mm"}
-        )
-        monthly_out.to_excel(writer, index=False, sheet_name="Monthly Summary")
-        ws2 = writer.sheets["Monthly Summary"]
-        for ci, cn in enumerate(monthly_out.columns):
-            ws2.write(0, ci, cn, hdr_fmt)
-        ws2.set_column(0, 2, 14)
-        ws2.freeze_panes(1, 0)
+        if "daily" in requested:
+            d = df[["Date", rain_col]].copy()
+            d["Date"] = d["Date"].dt.strftime("%Y-%m-%d")
+            d = d.rename(columns={rain_col: "Rainfall_mm"})
+            _write_sheet(d, "Daily Rainfall", [12, 14])
 
-        # Sheet 3: Annual Summary
-        annual.to_excel(writer, index=False, sheet_name="Annual Summary")
-        ws3 = writer.sheets["Annual Summary"]
-        for ci, cn in enumerate(annual.columns):
-            ws3.write(0, ci, cn, hdr_fmt)
-        ws3.set_column(0, 2, 14)
-        ws3.freeze_panes(1, 0)
+        if "monthly" in requested:
+            MN = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+                  7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+            mo = (df.groupby([df["Date"].dt.year.rename("Year"),
+                               df["Date"].dt.month.rename("Month")])[rain_col]
+                  .sum().round(1).reset_index())
+            mo["Month"] = mo["Month"].map(MN)
+            mo = mo.rename(columns={rain_col: "Total_mm"})
+            _write_sheet(mo, "Monthly Summary", [8, 10, 14])
+
+        if "annual" in requested:
+            an = (df.groupby(df["Date"].dt.year.rename("Year"))[rain_col]
+                  .agg(Total_mm="sum", Missing_Days=lambda x: int(x.isna().sum()))
+                  .round(1).reset_index())
+            _write_sheet(an, "Annual Summary", [8, 14, 14])
+
+        if "missing" in requested:
+            miss_df = _df_missing_days(df.rename(columns={rain_col: "Rainfall_mm"}))
+            if not miss_df.empty:
+                _write_sheet(miss_df, "Missing Days")
+
+        if "ams" in requested:
+            ams_df = _df_ams(df.rename(columns={rain_col: "Rainfall_mm"}),
+                             max_missing=ams_threshold)
+            if not ams_df.empty:
+                _write_sheet(ams_df, "AMS", [8, 14, 8, 10, 8, 14, 10])
+
+        if "ifd" in requested and lat is not None and lon is not None:
+            try:
+                ifd = _fetch_ifd(lat, lon)
+                if "_error" not in ifd:
+                    ifd_rows = []
+                    for dur in ifd.get("durations", []):
+                        mins = _dur_to_minutes(dur)
+                        row: dict = {"Duration": dur, "Duration_min": mins or ""}
+                        for aep in ifd.get("aep_cols", []):
+                            depth = ifd["table"].get(dur, {}).get(aep)
+                            row[f"Depth_{aep}_mm"] = depth if depth is not None else ""
+                            row[f"Intensity_{aep}_mmhr"] = (
+                                round(depth / mins * 60, 1)
+                                if (depth is not None and mins) else ""
+                            )
+                        ifd_rows.append(row)
+                    if ifd_rows:
+                        _write_sheet(pd.DataFrame(ifd_rows), "IFD (BOM 2016)")
+            except Exception:
+                pass
 
     buf.seek(0)
     return StreamingResponse(

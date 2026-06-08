@@ -227,7 +227,7 @@ function makeMarker(stn) {
   marker.bindPopup(`
     <div class="stn-popup">
       <h4 style="color:${color}">${stn.name}</h4>
-      <div class="meta">${stn.state} · ${stn.lat?.toFixed(2)}°, ${stn.lon?.toFixed(2)}°</div>
+      <div class="meta">${stn.state} · ${stn.lat?.toFixed(4)}°, ${stn.lon?.toFixed(4)}°</div>
       <div class="meta">ID: ${stn.id} · ${stn.start_year ?? "?"}–${stn.end_year ?? "?"} · ${pctStr} complete</div>
       <button class="popup-btn" onclick="selectStation('${stn.id}')">🌧️ View rainfall</button>
     </div>`, { maxWidth: 230 });
@@ -394,8 +394,8 @@ function openPanel(stn) {
   document.getElementById("panel-stn-id").textContent = `#${stn.id}`;
   document.getElementById("panel-name").textContent = stn.name;
   // Preliminary meta from station list (lat/lon/open year available immediately)
-  const _lat = stn.lat != null ? stn.lat.toFixed(3) + "°" : "—";
-  const _lon = stn.lon != null ? stn.lon.toFixed(3) + "°" : "—";
+  const _lat = stn.lat != null ? stn.lat.toFixed(4) + "°" : "—";
+  const _lon = stn.lon != null ? stn.lon.toFixed(4) + "°" : "—";
   const _opn = stn.start_year ?? "—";
   document.getElementById("panel-meta").innerHTML = buildPanelMeta(_lat, _lon, _opn, "—", "—");
 
@@ -625,8 +625,8 @@ async function loadStationData(id) {
       document.getElementById("panel-name").innerHTML =
         `${escHtml(si.name || App.selected.name)} &nbsp;${status}`;
 
-      const latStr = si.lat != null ? si.lat.toFixed(3) + "°" : "—";
-      const lonStr = si.lon != null ? si.lon.toFixed(3) + "°" : "—";
+      const latStr = si.lat != null ? si.lat.toFixed(4) + "°" : "—";
+      const lonStr = si.lon != null ? si.lon.toFixed(4) + "°" : "—";
       const openedStr = si.opened ?? "—";
 
       // Data period: first → last recorded date
@@ -722,6 +722,7 @@ function populateYearSelects(dates) {
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
+    if (!btn.dataset.tab) return;   // buttons without data-tab handle their own onclick
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
     btn.classList.add("active");
@@ -944,7 +945,10 @@ async function loadIFD(lat, lon) {
     if (App.activeTab === "ams") loadAMSTab();
   } catch (e) {
     App.ifdData = null;
-    contentEl.innerHTML = `<div style="font-size:.78em;color:var(--text-muted)">IFD unavailable: ${e.message}</div>`;
+    const msg = e.message.startsWith("404")
+      ? "Outside BOM IFD coverage area (Australian mainland only)"
+      : `IFD unavailable: ${e.message}`;
+    contentEl.innerHTML = `<div style="font-size:.78em;color:var(--text-muted)">${msg}</div>`;
   }
 }
 
@@ -1250,15 +1254,22 @@ function loadAnnualChart() {
   const yrs   = Object.keys(annual).map(Number).sort((a, b) => a - b);
   const yVals = yrs.map(yr => round1(annual[yr]));
 
-  const missCounts = yrs.map(yr => annualMissing(yr).missing);
-  const colors = yrs.map((yr, i) => {
+  const CATS = [
+    { key: "complete", label: "0 missing days",   color: "#1a6eb5" },
+    { key: "minor",    label: "1–18 days missing", color: "#f39c12" },
+    { key: "major",    label: ">18 days missing",  color: "#e74c3c" },
+    { key: "nodata",   label: "No data",           color: "#cccccc" },
+  ];
+
+  function catKey(yr) {
     const { missing, expected } = annualMissing(yr);
     const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
-    if (!hasData) return "#cccccc";
-    if (!expected || missing === 0) return "#1a6eb5";
-    return (missing / expected) <= 0.05 ? "#f39c12" : "#e74c3c";
-  });
-  const barLabels  = missCounts.map(m => m > 0 ? `⚠ ${m} days` : "");
+    if (!hasData) return "nodata";
+    if (!expected || missing === 0) return "complete";
+    return (missing / expected) <= 0.05 ? "minor" : "major";
+  }
+
+  const missCounts = yrs.map(yr => annualMissing(yr).missing);
   const hoverTexts = yrs.map((yr, i) => {
     const m = missCounts[i];
     const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
@@ -1266,23 +1277,32 @@ function loadAnnualChart() {
     const base = `${yVals[i]} mm`;
     return m > 0 ? `${base}<br>Missing: ${m} day${m !== 1 ? "s" : ""}` : base;
   });
+  const barLabels = missCounts.map(m => m > 0 ? `⚠ ${m}` : "");
 
+  // One trace per category so Plotly can render a legend
   const _abg = plotBg();
-  Plotly.react("annual-chart-area", [{
-    x: yrs, y: yVals, type: "bar",
-    marker: { color: colors, opacity: 0.85 },
-    text: barLabels,
+  const traces = CATS.map(cat => ({
+    x: yrs,
+    y: yrs.map((yr, i) => catKey(yr) === cat.key ? yVals[i] : null),
+    type: "bar",
+    name: cat.label,
+    marker: { color: cat.color, opacity: 0.85 },
+    text: yrs.map((yr, i) => catKey(yr) === cat.key ? barLabels[i] : ""),
     textposition: "outside",
-    textfont: { size: 10, color: "#e74c3c" },
+    textfont: { size: 9, color: "#e74c3c" },
     cliponaxis: false,
     customdata: hoverTexts,
     hovertemplate: "<b>%{x}</b><br>%{customdata}<extra></extra>",
-  }], {
+  }));
+
+  Plotly.react("annual-chart-area", traces, {
     margin: { t: 10, r: 10, b: 40, l: 60 },
     paper_bgcolor: _abg.paper, plot_bgcolor: _abg.plot,
     yaxis: { title: "Annual Rainfall (mm)", gridcolor: _abg.grid, zeroline: false, autorange: true },
     xaxis: { type: "linear", dtick: 10, gridcolor: _abg.grid },
-    showlegend: false,
+    barmode: "overlay",
+    showlegend: true,
+    legend: { orientation: "h", y: 1.08, x: 0, xanchor: "left", font: { size: 11 } },
     font: { family: "Inter, sans-serif", size: 11, color: _abg.text },
     uniformtext: { mode: "hide", minsize: 8 },
   }, { responsive: true, displayModeBar: false });
@@ -1517,21 +1537,24 @@ function loadIFDChart() {
     return;
   }
 
-  // Duration x-axis in minutes (log scale)
+  const bg      = plotBg();
   const durMins = durations.map(_durToMins);
 
-  const bg = plotBg();
-  const traces = [];
+  // Index-based x (even spacing per data point — avoids log-scale distortion)
+  const xIdx = durations.map((_, i) => i);
 
-  // One line per AEP — depth (mm) vs duration (minutes), matching BOM chart convention
+  // Purge any stale chart from a previous station before rebuilding
+  try { Plotly.purge("ifd-chart-area"); } catch {}
+
+  const traces = [];
   aepCols.forEach(aep => {
-    const color = IFD_CURVE_COLORS[aep] ?? "#999";
+    const color  = IFD_CURVE_COLORS[aep] ?? "#999";
     const yDepth = durations.map(dur => table[dur]?.[aep] ?? null);
+    // Skip traces where every value is null — they trigger the Plotly ghost image
+    if (yDepth.every(v => v === null)) return;
     traces.push({
-      x: durMins,
-      y: yDepth,
-      mode: "lines+markers",
-      type: "scatter",
+      x: xIdx, y: yDepth,
+      mode: "lines+markers", type: "scatter",
       name: `AEP ${aep}`,
       line:   { color, width: 1.8 },
       marker: { color, size: 4 },
@@ -1540,23 +1563,77 @@ function loadIFDChart() {
     });
   });
 
-  // Duration tick labels for x-axis
-  const tickVals = [1, 5, 10, 30, 60, 120, 360, 720, 1440, 4320, 10080];
-  const tickText = ["1m","5m","10m","30m","1h","2h","6h","12h","24h","3d","7d"];
+  if (!traces.length) {
+    area.innerHTML = '<div class="empty-msg"><div class="big-icon">📐</div>No IFD depth values available</div>';
+    return;
+  }
+
+  // Show only key tick labels with unit-relative numbers
+  const showMin = new Set([1, 2, 3, 4, 5, 10, 15, 30]);
+  const showHr  = new Set([60, 120, 180, 360, 720]);
+  const showDay = new Set([1440, 2880, 4320, 5760, 7200, 8640, 10080]);
+  const tickVals = [], tickText = [];
+  durMins.forEach((m, i) => {
+    if (m === null) return;
+    if      (showMin.has(m))  { tickVals.push(i); tickText.push(String(m)); }
+    else if (showHr.has(m))   { tickVals.push(i); tickText.push(String(m / 60)); }
+    else if (showDay.has(m))  { tickVals.push(i); tickText.push(String(m / 1440)); }
+  });
+
+  // Separator indices at group boundaries
+  const lastMinI  = durMins.reduce((p, m, i) => (m != null && m <  60)   ? i : p, -1);
+  const firstHrI  = durMins.findIndex(m => m != null && m >=  60);
+  const lastHrI   = durMins.reduce((p, m, i) => (m != null && m < 1440)  ? i : p, -1);
+  const firstDayI = durMins.findIndex(m => m != null && m >= 1440);
+
+  const shapes = [];
+  [[lastMinI, firstHrI], [lastHrI, firstDayI]].forEach(([a, b]) => {
+    if (a >= 0 && b >= 0) shapes.push({
+      type: "line",
+      xref: "x", x0: (a + b) / 2, x1: (a + b) / 2,
+      yref: "paper", y0: 0, y1: 1,
+      line: { color: bg.grid, width: 1.5 },
+    });
+  });
+
+  // Group label annotations centred below each section
+  const mid = idxs => idxs.length ? (idxs[0] + idxs[idxs.length - 1]) / 2 : null;
+  const minIdxs = xIdx.filter((_, i) => durMins[i] != null && durMins[i] <   60);
+  const hrIdxs  = xIdx.filter((_, i) => durMins[i] != null && durMins[i] >=  60 && durMins[i] < 1440);
+  const dayIdxs = xIdx.filter((_, i) => durMins[i] != null && durMins[i] >= 1440);
+
+  const annotations = [
+    { x: mid(minIdxs), text: "minutes" },
+    { x: mid(hrIdxs),  text: "hours"   },
+    { x: mid(dayIdxs), text: "days"    },
+  ].filter(a => a.x != null).map(({ x, text }) => ({
+    xref: "x", x,
+    yref: "paper", y: -0.16,
+    text, showarrow: false,
+    font: { size: 11, color: bg.text },
+    xanchor: "center", yanchor: "top",
+  }));
 
   Plotly.react("ifd-chart-area", traces, {
-    margin: { t: 16, r: 10, b: 56, l: 62 },
+    margin: { t: 16, r: 10, b: 72, l: 62 },
     paper_bgcolor: bg.paper, plot_bgcolor: bg.plot,
     xaxis: {
-      type: "log", title: "Duration",
-      gridcolor: bg.grid,
-      tickvals: tickVals, ticktext: tickText, tickangle: -30,
+      title: "Duration",
+      showgrid: false,
+      tickvals: tickVals, ticktext: tickText, tickangle: 0,
+      ticks: "outside", ticklen: 4,
     },
     yaxis: { title: "Rainfall Depth (mm)", gridcolor: bg.grid, zeroline: false },
-    legend: { orientation: "h", y: -0.22, font: { size: 9 }, tracegroupgap: 0 },
+    legend: { orientation: "h", y: -0.26, font: { size: 9 }, tracegroupgap: 0 },
+    annotations, shapes,
     font: { family: "Inter, sans-serif", size: 11, color: bg.text },
     hovermode: "closest",
   }, { responsive: true, displayModeBar: false });
+
+  // Remove the Plotly ghost/placeholder SVG image element after render
+  setTimeout(() => {
+    document.querySelectorAll("#ifd-chart-area image").forEach(el => el.remove());
+  }, 0);
 }
 
 // ── Cumulative Tab ─────────────────────────────────────────────────────────────
@@ -1577,16 +1654,14 @@ function loadCumulativeTab() {
   });
   const doyMean = doySum.map((s, i) => doyCount[i] > 0 ? s / doyCount[i] : 0);
 
-  // Step 2: accumulate (actual − mean) over the year-filtered record
-  const [y1, y2] = App.yearRange;
+  // Step 2: accumulate (actual − mean) over the full record
   const dates   = [];
   const cumVals = [];
   let cumSum = 0;
 
   data.dates.forEach((d, i) => {
-    const yr = parseInt(d.slice(0, 4));
-    if (yr < y1 || yr > y2) return;
-    const v   = data.values[i] ?? 0;
+    const v = data.values[i];
+    if (v === null) return;   // skip missing days, same as mean computation
     const dt  = new Date(d);
     const doy = Math.floor((dt - new Date(dt.getFullYear(), 0, 0)) / 86400000);
     const mean = (doy >= 1 && doy <= 366) ? doyMean[doy] : 0;
@@ -1626,7 +1701,14 @@ window.openDownloadModal = function() {
     `⬇ Download — #${App.selected.id} ${App.selected.name}`;
   const ifdChk = document.getElementById("dlm-ifd");
   if (ifdChk) ifdChk.disabled = !App.ifdData;
+  updateDlBtn();
   document.getElementById("dl-modal-overlay").classList.add("open");
+};
+
+window.updateDlBtn = function() {
+  const fmt = document.querySelector('input[name="dl-format"]:checked')?.value ?? "csv";
+  const btn = document.getElementById("dl-modal-go-btn");
+  if (btn) btn.textContent = fmt === "xlsx" ? "Download XLSX" : "Download CSV";
 };
 
 window.closeDownloadModal = function(e) {
@@ -1757,47 +1839,60 @@ function genIFDCSV() {
 window.triggerModalDownloads = async function() {
   const btn = document.getElementById("dl-modal-go-btn");
   btn.disabled = true;
+  const origLabel = btn.textContent;
   btn.textContent = "Downloading…";
 
-  const stn      = App.selected;
-  const id       = stn?.id ?? "station";
-  const name     = (stn?.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
-  const base     = `${id}_${name}`;
-  const dist     = document.getElementById("dl-distribute")?.checked ?? true;
-  const thresh   = parseInt(document.getElementById("dlm-ams-thresh")?.value ?? 30);
+  const stn    = App.selected;
+  const id     = stn?.id ?? "station";
+  const name   = (stn?.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
+  const base   = `${id}_${name}`;
+  const dist   = document.getElementById("dl-distribute")?.checked ?? true;
+  const thresh = parseInt(document.getElementById("dlm-ams-thresh")?.value ?? 30);
+  const fmt    = document.querySelector('input[name="dl-format"]:checked')?.value ?? "csv";
+
+  const sel = {
+    daily:   !!document.getElementById("dlm-daily")?.checked,
+    monthly: !!document.getElementById("dlm-monthly")?.checked,
+    annual:  !!document.getElementById("dlm-annual")?.checked,
+    missing: !!document.getElementById("dlm-missing")?.checked,
+    ams:     !!document.getElementById("dlm-ams")?.checked,
+    ifd:     !!(document.getElementById("dlm-ifd")?.checked && App.ifdData),
+  };
 
   try {
-    if (document.getElementById("dlm-daily")?.checked) {
-      const url = `${API}/api/export/${id}/csv?distribute=${dist}`;
-      const res = await fetch(url);
+    if (fmt === "xlsx") {
+      const sheets = Object.entries(sel).filter(([,v]) => v).map(([k]) => k).join(",");
+      if (!sheets) { btn.disabled = false; btn.textContent = origLabel; return; }
+      const si  = App.stationData?.station;
+      const lat = si?.lat ?? stn?.lat;
+      const lon = si?.lon ?? stn?.lon;
+      let url = `${API}/api/export/${id}/xlsx?distribute=${dist}&sheets=${encodeURIComponent(sheets)}&ams_threshold=${thresh}`;
+      if (lat != null && lon != null) url += `&lat=${lat}&lon=${lon}`;
+      const res  = await fetch(url);
       const blob = await res.blob();
-      const fn = res.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${base}_daily.csv`;
-      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = fn; a.click();
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (document.getElementById("dlm-monthly")?.checked) {
-      downloadCSVBlob(genMonthlyCSV(), `${base}_monthly.csv`);
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (document.getElementById("dlm-annual")?.checked) {
-      downloadCSVBlob(genAnnualCSV(), `${base}_annual.csv`);
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (document.getElementById("dlm-missing")?.checked) {
-      downloadCSVBlob(genMissingCSV(), `${base}_missing.csv`);
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (document.getElementById("dlm-ams")?.checked) {
-      downloadCSVBlob(genAMSCSV(thresh), `${base}_ams.csv`);
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (document.getElementById("dlm-ifd")?.checked && App.ifdData) {
-      downloadCSVBlob(genIFDCSV(), `${base}_ifd.csv`);
+      const a    = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = `${base}.xlsx`; a.click();
+      URL.revokeObjectURL(a.href);
+    } else {
+      // CSV — separate file per selection
+      const delay = () => new Promise(r => setTimeout(r, 300));
+      if (sel.daily) {
+        const res = await fetch(`${API}/api/export/${id}/csv?distribute=${dist}`);
+        const blob = await res.blob();
+        const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+        a.download = `${base}_daily.csv`; a.click(); URL.revokeObjectURL(a.href);
+        await delay();
+      }
+      if (sel.monthly) { downloadCSVBlob(genMonthlyCSV(), `${base}_monthly.csv`); await delay(); }
+      if (sel.annual)  { downloadCSVBlob(genAnnualCSV(),  `${base}_annual.csv`);  await delay(); }
+      if (sel.missing) { downloadCSVBlob(genMissingCSV(), `${base}_missing.csv`); await delay(); }
+      if (sel.ams)     { downloadCSVBlob(genAMSCSV(thresh), `${base}_ams.csv`);   await delay(); }
+      if (sel.ifd)     { downloadCSVBlob(genIFDCSV(),    `${base}_ifd.csv`); }
     }
   } finally {
     btn.disabled = false;
-    btn.textContent = "Download CSVs";
-    closeDownloadModal();
+    btn.textContent = origLabel;
+    document.getElementById("dl-modal-overlay").classList.remove("open");
   }
 };
 

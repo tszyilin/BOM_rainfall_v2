@@ -1,8 +1,6 @@
 fastapi
 uvicorn[standard]
 pandas
-geopandas
-fiona
 requests
 lxml
 html5lib

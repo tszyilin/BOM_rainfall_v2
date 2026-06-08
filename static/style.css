@@ -26,7 +26,7 @@
   --sidebar-w:      320px;
   --header-h:       58px;
   --panel-h:        430px;
-  --right-w:        310px;
+  --right-w:        0px;
 }
 
 /* ── Dark theme overrides ─────────────────────────────────── */
@@ -347,6 +347,7 @@ input, select { font-family: inherit; }
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
+  color: var(--text);
   font-size: .85em;
   outline: none;
   transition: var(--transition);
@@ -370,7 +371,10 @@ input, select { font-family: inherit; }
   font-size: .88em;
   outline: none;
   transition: var(--transition);
+  background: var(--bg);
+  color: var(--text);
 }
+#loc-input::placeholder { color: var(--text-muted); }
 #loc-input:focus { border-color: var(--primary); }
 
 #loc-suggestions {
@@ -1590,6 +1594,41 @@ input, select { font-family: inherit; }
   color: var(--text);
 }
 .dl-modal-row input[type=checkbox] { accent-color: var(--primary); }
+.dl-format-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.dl-format-opt {
+  flex: 1;
+  cursor: pointer;
+}
+.dl-format-opt input[type="radio"] { display: none; }
+.dl-format-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  transition: var(--transition);
+  background: var(--bg2);
+}
+.dl-format-opt input:checked + .dl-format-card {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.dl-format-name {
+  font-weight: 700;
+  font-size: .9em;
+  color: var(--text);
+}
+.dl-format-desc {
+  font-size: .72em;
+  color: var(--text-muted);
+  text-align: center;
+}
 .dl-modal-footer {
   display: flex;
   gap: 10px;
@@ -1597,6 +1636,13 @@ input, select { font-family: inherit; }
   border-top: 1px solid var(--border);
   justify-content: flex-end;
 }
+
+/* ── Hide Plotly ghost/no-data placeholder image ─────────────────────────── */
+.js-plotly-plot image,
+.js-plotly-plot svg image,
+.js-plotly-plot .js-placeholder-image,
+.js-plotly-plot image[href],
+.js-plotly-plot image[*|href] { display: none !important; }
 
 /* ── Fav latest reading ───────────────────────────────────── */
 .fav-latest {
