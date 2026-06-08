@@ -27,7 +27,8 @@ window.toggleDarkMode = function() {
 
   // Re-colour every rendered Plotly chart instantly
   const bg = plotBg();
-  ["daily-chart-area", "monthly-chart-area", "annual-chart-area", "compare-chart-area"].forEach(id => {
+  ["daily-chart-area", "monthly-chart-area", "annual-chart-area", "compare-chart-area",
+   "ams-chart-area", "ifd-chart-area", "cumulative-chart-area"].forEach(id => {
     const el = document.getElementById(id);
     if (el?._fullLayout) {
       Plotly.relayout(id, {
@@ -50,6 +51,7 @@ window.toggleDarkMode = function() {
 
 // IFD AEP colours (50% → 1 in 2000)
 const IFD_COLORS = [
+  "#1abc9c",  // 63.2%
   "#27ae60",  // 50%
   "#2ecc71",  // 20%
   "#f1c40f",  // 10%
@@ -61,7 +63,7 @@ const IFD_COLORS = [
   "#6c3483",  // 1 in 1000
   "#4a235a",  // 1 in 2000
 ];
-const IFD_PREFERRED = ["50%","20%","10%","5%","2%","1%","1 in 200","1 in 500","1 in 1000","1 in 2000"];
+const IFD_PREFERRED = ["63.2%","50%","20%","10%","5%","2%","1%","1 in 200","1 in 500","1 in 1000","1 in 2000"];
 const IFD_DEFAULTS  = new Set(["20%","10%","1%"]);
 
 // Station comparison palette (up to 6 stations)
@@ -77,7 +79,7 @@ const App = {
   favourites:   new Set(JSON.parse(localStorage.getItem("rf-favs") ?? "[]")),
   refLines:     JSON.parse(localStorage.getItem("rf-reflines") ?? "[]"),
   ifdChecked:   JSON.parse(localStorage.getItem("rf-ifd-checked") ?? "{}"),
-  filters: { state: "", activeOnly: false, minPct: 0, radius: 100 },
+  filters: { state: "", activeOnly: false, minPct: 0, radius: 10 },
   locationPin:  null,
   chartType:    "bar",   // 'bar' or 'line'
   yearRange:    [null, null],
@@ -96,6 +98,9 @@ const App = {
   comparison:   [],      // [{id, name, data: null|{dates,values}}]
   compareView:  "annual", // 'annual' | 'monthly'
   compareMonth: 1,
+  // Feature additions
+  latestCache:  {},      // {stationId: {val, date}}
+  amsThreshold: 30,
 };
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -134,11 +139,14 @@ function pctBadgeClass(pct) {
   return "red";
 }
 
-function dotColor(pct) {
-  if (pct == null) return "#999";
-  if (pct >= 90)   return "#2ecc71";
-  if (pct >= 70)   return "#f39c12";
-  return "#e74c3c";
+// Computed once after stations load — max end_year in the dataset
+let _maxEndYear = null;
+function stationColor(stn) {
+  if (stn.end_year == null) return "#999";
+  if (_maxEndYear === null) {
+    _maxEndYear = Math.max(...App.allStations.map(s => s.end_year ?? 0));
+  }
+  return stn.end_year >= _maxEndYear - 1 ? "#27ae60" : "#e74c3c";
 }
 
 function saveFavs() {
@@ -201,7 +209,7 @@ function initMap() {
 }
 
 function makeMarker(stn) {
-  const color = dotColor(stn.pct_complete);
+  const color = stationColor(stn);
   const icon = L.divIcon({
     html: `<div style="
       width:11px;height:11px;border-radius:50%;
@@ -302,15 +310,25 @@ function renderFavList() {
     el.innerHTML = '<div style="font-size:.8em;color:var(--text-muted);padding:0 0 10px">No favourites yet — click ☆ on a station.</div>';
     return;
   }
-  el.innerHTML = favStns.map(s => `
+  el.innerHTML = favStns.map(s => {
+    const lc = App.latestCache[s.id];
+    const latestHtml = lc
+      ? `<span class="fav-latest">${lc.date.slice(8,10)}/${lc.date.slice(5,7)}/${lc.date.slice(0,4)}: ${lc.val} mm</span>`
+      : "";
+    return `
     <div class="station-card" onclick="selectStation('${s.id}')">
-      <div class="station-dot" style="background:${dotColor(s.pct_complete)}"></div>
+      <div class="station-dot" style="background:${stationColor(s)}"></div>
       <div class="station-info">
-        <div class="station-name">${s.name}</div>
-        <div class="station-meta">${s.state} · ${s.id}</div>
+        <div class="station-name" style="display:flex;align-items:center;gap:5px">
+          <span class="stn-id-tag">#${s.id}</span>${escHtml(s.name)}
+        </div>
+        <div class="station-meta" style="display:flex;gap:8px;align-items:center">
+          ${s.state}${latestHtml}
+        </div>
       </div>
       <button class="fav-star on" onclick="event.stopPropagation();toggleFav('${s.id}')">★</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 // ── Favourites ────────────────────────────────────────────────────────────────
@@ -371,6 +389,7 @@ function buildPanelMeta(lat, lon, opened, period, latest) {
 function openPanel(stn) {
   const panel = document.getElementById("detail-panel");
   panel.classList.add("open");
+  document.getElementById("detail-panel-sizer")?.classList.add("open");
 
   document.getElementById("panel-stn-id").textContent = `#${stn.id}`;
   document.getElementById("panel-name").textContent = stn.name;
@@ -406,6 +425,7 @@ function openPanel(stn) {
 
 function closePanel() {
   document.getElementById("detail-panel").classList.remove("open");
+  document.getElementById("detail-panel-sizer")?.classList.remove("open");
   App.selected     = null;
   App.stationData  = null;
   App.ifdData      = null;
@@ -492,8 +512,9 @@ function renderCompareList() {
       <div class="compare-item">
         <div class="compare-dot" style="background:${color}"></div>
         <div class="compare-info">
-          <div class="compare-name">${c.name}</div>
-          <div class="compare-meta">${c.id}</div>
+          <div class="compare-name" style="display:flex;align-items:center;gap:5px">
+            <span class="stn-id-tag">#${c.id}</span>${escHtml(c.name)}
+          </div>
         </div>
         ${spinner}
         <button class="compare-remove-btn" onclick="removeFromComparison('${c.id}')" title="Remove">✕</button>
@@ -624,6 +645,9 @@ async function loadStationData(id) {
         ? `${latestVal} mm (${latestDate.slice(8,10)}/${latestDate.slice(5,7)}/${latestDate.slice(0,4)})`
         : "—";
 
+      // Cache for fav list display
+      if (latestDate) App.latestCache[id] = { val: latestVal, date: latestDate };
+
       document.getElementById("panel-meta").innerHTML =
         buildPanelMeta(latStr, lonStr, openedStr, period, latestStr);
     }
@@ -710,10 +734,13 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 
 function loadCurrentTab() {
   if (!App.stationData) return;
-  if (App.activeTab === "daily")    loadDailyChart();
-  if (App.activeTab === "monthly")  loadMonthlyChart();
-  if (App.activeTab === "annual")   loadAnnualChart();
-  if (App.activeTab === "missing")  loadMissingDaysTab();
+  if (App.activeTab === "daily")      loadDailyChart();
+  if (App.activeTab === "monthly")    loadMonthlyChart();
+  if (App.activeTab === "annual")     loadAnnualChart();
+  if (App.activeTab === "missing")    loadMissingDaysTab();
+  if (App.activeTab === "ams")        loadAMSTab();
+  if (App.activeTab === "ifd-chart")  loadIFDChart();
+  if (App.activeTab === "cumulative") loadCumulativeTab();
 }
 
 // ── Daily Chart ───────────────────────────────────────────────────────────────
@@ -913,6 +940,8 @@ async function loadIFD(lat, lon) {
   try {
     App.ifdData = await apiFetch("/api/ifd", { lat, lon });
     renderIFDPanel();
+    if (App.activeTab === "ifd-chart") loadIFDChart();
+    if (App.activeTab === "ams") loadAMSTab();
   } catch (e) {
     App.ifdData = null;
     contentEl.innerHTML = `<div style="font-size:.78em;color:var(--text-muted)">IFD unavailable: ${e.message}</div>`;
@@ -1064,59 +1093,118 @@ function loadMonthlyChart() {
   const data = App.stationData;
   if (!data?.dates?.length) return;
 
-  // Aggregate daily → monthly
-  const monthly = {};  // {year: {month: total}}
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
+
+  // Aggregate daily → monthly rainfall + count days with real values per month
+  const monthly  = {};  // {year: {month: total}}
+  const recorded = {};  // {year: {month: non-null day count}}
   data.dates.forEach((d, i) => {
     const yr = parseInt(d.slice(0, 4));
     const mo = parseInt(d.slice(5, 7));
     const v  = data.values[i];
-    if (!monthly[yr]) monthly[yr] = {};
+    if (!monthly[yr])  monthly[yr]  = {};
+    if (!recorded[yr]) recorded[yr] = {};
     monthly[yr][mo] = (monthly[yr][mo] ?? 0) + (v ?? 0);
+    if (v !== null) recorded[yr][mo] = (recorded[yr][mo] ?? 0) + 1;
   });
 
-  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function missColor(missing, expected) {
+    if (!expected || missing === 0) return "#1a6eb5";
+    return (missing / expected) <= 0.05 ? "#f39c12" : "#e74c3c";
+  }
+
+  function missText(base, missing) {
+    if (missing <= 0) return base;
+    return `${base}<br>Missing: ${missing} day${missing !== 1 ? "s" : ""}`;
+  }
 
   if (App.monthlyView === "year") {
-    // 12-bar chart for selected year
-    const yr  = App.monthlyYear;
+    const yr    = App.monthlyYear;
     const mData = monthly[yr] ?? {};
     const xVals = MONTHS;
-    const yVals = MONTHS.map((_, mi) => round1(mData[mi + 1] ?? null));
+
+    const missingCounts = MONTHS.map((_, mi) => {
+      const mo = mi + 1;
+      const pres = recorded[yr]?.[mo] ?? 0;
+      return Math.max(0, dim(yr, mo) - pres);
+    });
+    // Use 0 instead of null for absent months so Plotly still renders a bar anchor for the label
+    const yVals  = MONTHS.map((_, mi) => round1(mData[mi + 1] ?? 0));
+    const colors = MONTHS.map((_, mi) => {
+      const mo = mi + 1;
+      const pres = recorded[yr]?.[mo] ?? 0;
+      if (pres === 0) return "#cccccc";
+      return missColor(missingCounts[mi], dim(yr, mo));
+    });
+    const barLabels  = missingCounts.map(m => m > 0 ? `⚠ ${m} days` : "");
+    const hoverTexts = MONTHS.map((_, mi) => {
+      const pres = recorded[yr]?.[mi + 1] ?? 0;
+      if (pres === 0) return `No data — ${missingCounts[mi]} days missing`;
+      return missText(`${yVals[mi]} mm`, missingCounts[mi]);
+    });
 
     const _mbg1 = plotBg();
     Plotly.react("monthly-chart-area", [{
       x: xVals, y: yVals, type: "bar",
-      marker: { color: "#1a6eb5", opacity: 0.8 },
-      hovertemplate: "<b>%{x}</b><br>Rainfall: %{y} mm<extra></extra>",
+      marker: { color: colors, opacity: 0.85 },
+      text: barLabels,
+      textposition: "outside",
+      textfont: { size: 10, color: "#e67e22" },
+      cliponaxis: false,
+      customdata: hoverTexts,
+      hovertemplate: "<b>%{x}</b><br>%{customdata}<extra></extra>",
     }], {
       margin: { t: 10, r: 10, b: 40, l: 60 },
       paper_bgcolor: _mbg1.paper, plot_bgcolor: _mbg1.plot,
-      yaxis: { title: "Rainfall (mm)", gridcolor: _mbg1.grid, zeroline: false },
+      yaxis: { title: "Rainfall (mm)", gridcolor: _mbg1.grid, zeroline: false, autorange: true },
       xaxis: { gridcolor: _mbg1.grid },
       showlegend: false,
       font: { family: "Inter, sans-serif", size: 11, color: _mbg1.text },
       title: { text: `Monthly Rainfall — ${yr}`, font: { size: 13 } },
+      uniformtext: { mode: "hide", minsize: 8 },
     }, { responsive: true, displayModeBar: false });
 
   } else {
-    // All-years chart for selected month
-    const mo = App.monthlyMonth;
-    const yrs   = Object.keys(monthly).map(Number).sort((a, b) => a - b);
-    const yVals = yrs.map(yr => round1(monthly[yr]?.[mo] ?? null));
+    const mo   = App.monthlyMonth;
+    const yrs  = Object.keys(monthly).map(Number).sort((a, b) => a - b);
+
+    const missingCounts = yrs.map(yr => {
+      const pres = recorded[yr]?.[mo] ?? 0;
+      return Math.max(0, dim(yr, mo) - pres);
+    });
+    const yVals  = yrs.map(yr => round1(monthly[yr]?.[mo] ?? 0));
+    const colors = yrs.map((yr, i) => {
+      const pres = recorded[yr]?.[mo] ?? 0;
+      if (pres === 0) return "#cccccc";
+      return missColor(missingCounts[i], dim(yr, mo));
+    });
+    const barLabels  = missingCounts.map(m => m > 0 ? `⚠ ${m} days` : "");
+    const hoverTexts = yrs.map((yr, i) => {
+      const pres = recorded[yr]?.[mo] ?? 0;
+      if (pres === 0) return `No data — ${missingCounts[i]} days missing`;
+      return missText(`${yVals[i]} mm`, missingCounts[i]);
+    });
 
     const _mbg2 = plotBg();
     Plotly.react("monthly-chart-area", [{
       x: yrs, y: yVals, type: "bar",
-      marker: { color: "#1a6eb5", opacity: 0.8 },
-      hovertemplate: "<b>%{x}</b><br>Rainfall: %{y} mm<extra></extra>",
+      marker: { color: colors, opacity: 0.85 },
+      text: barLabels,
+      textposition: "outside",
+      textfont: { size: 10, color: "#e67e22" },
+      cliponaxis: false,
+      customdata: hoverTexts,
+      hovertemplate: "<b>%{x}</b><br>%{customdata}<extra></extra>",
     }], {
       margin: { t: 10, r: 10, b: 40, l: 60 },
       paper_bgcolor: _mbg2.paper, plot_bgcolor: _mbg2.plot,
-      yaxis: { title: "Rainfall (mm)", gridcolor: _mbg2.grid, zeroline: false },
+      yaxis: { title: "Rainfall (mm)", gridcolor: _mbg2.grid, zeroline: false, autorange: true },
       xaxis: { type: "linear", tickmode: "auto", gridcolor: _mbg2.grid },
       showlegend: false,
       font: { family: "Inter, sans-serif", size: 11, color: _mbg2.text },
       title: { text: `${MONTHS[mo - 1]} Rainfall — All Years`, font: { size: 13 } },
+      uniformtext: { mode: "hide", minsize: 8 },
     }, { responsive: true, displayModeBar: false });
   }
 }
@@ -1128,29 +1216,75 @@ function loadAnnualChart() {
   const data = App.stationData;
   if (!data?.dates?.length) return;
 
-  // Aggregate daily → annual
-  const annual = {};
+  const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
+
+  // Aggregate daily → annual rainfall + count days with real values per month
+  const annual   = {};
+  const recorded = {};  // {year: {month: non-null day count}}
   data.dates.forEach((d, i) => {
     const yr = parseInt(d.slice(0, 4));
+    const mo = parseInt(d.slice(5, 7));
     const v  = data.values[i];
     annual[yr] = (annual[yr] ?? 0) + (v ?? 0);
+    if (!recorded[yr]) recorded[yr] = {};
+    if (v !== null) recorded[yr][mo] = (recorded[yr][mo] ?? 0) + 1;
   });
+
+  const allMonths  = [...new Set(data.dates.map(d => d.slice(0, 7)))].sort();
+  const [firstYr, firstMo] = allMonths[0].split("-").map(Number);
+  const [lastYr,  lastMo]  = allMonths[allMonths.length - 1].split("-").map(Number);
+
+  function annualMissing(yr) {
+    let missing = 0, expected = 0;
+    for (let mo = 1; mo <= 12; mo++) {
+      if (yr === firstYr && mo < firstMo) continue;
+      if (yr === lastYr  && mo > lastMo)  continue;
+      const pres = recorded[yr]?.[mo] ?? 0;
+      const e = dim(yr, mo);
+      expected += e;
+      missing  += Math.max(0, e - pres);
+    }
+    return { missing, expected };
+  }
 
   const yrs   = Object.keys(annual).map(Number).sort((a, b) => a - b);
   const yVals = yrs.map(yr => round1(annual[yr]));
 
+  const missCounts = yrs.map(yr => annualMissing(yr).missing);
+  const colors = yrs.map((yr, i) => {
+    const { missing, expected } = annualMissing(yr);
+    const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
+    if (!hasData) return "#cccccc";
+    if (!expected || missing === 0) return "#1a6eb5";
+    return (missing / expected) <= 0.05 ? "#f39c12" : "#e74c3c";
+  });
+  const barLabels  = missCounts.map(m => m > 0 ? `⚠ ${m} days` : "");
+  const hoverTexts = yrs.map((yr, i) => {
+    const m = missCounts[i];
+    const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
+    if (!hasData) return `No data — ${m} days missing`;
+    const base = `${yVals[i]} mm`;
+    return m > 0 ? `${base}<br>Missing: ${m} day${m !== 1 ? "s" : ""}` : base;
+  });
+
   const _abg = plotBg();
   Plotly.react("annual-chart-area", [{
     x: yrs, y: yVals, type: "bar",
-    marker: { color: "#1a6eb5", opacity: 0.8 },
-    hovertemplate: "<b>%{x}</b><br>Annual Rainfall: %{y} mm<extra></extra>",
+    marker: { color: colors, opacity: 0.85 },
+    text: barLabels,
+    textposition: "outside",
+    textfont: { size: 10, color: "#e74c3c" },
+    cliponaxis: false,
+    customdata: hoverTexts,
+    hovertemplate: "<b>%{x}</b><br>%{customdata}<extra></extra>",
   }], {
     margin: { t: 10, r: 10, b: 40, l: 60 },
     paper_bgcolor: _abg.paper, plot_bgcolor: _abg.plot,
-    yaxis: { title: "Annual Rainfall (mm)", gridcolor: _abg.grid, zeroline: false },
+    yaxis: { title: "Annual Rainfall (mm)", gridcolor: _abg.grid, zeroline: false, autorange: true },
     xaxis: { type: "linear", dtick: 10, gridcolor: _abg.grid },
     showlegend: false,
     font: { family: "Inter, sans-serif", size: 11, color: _abg.text },
+    uniformtext: { mode: "hide", minsize: 8 },
   }, { responsive: true, displayModeBar: false });
 }
 
@@ -1173,11 +1307,13 @@ function loadMissingDaysTab() {
   const { dates } = data;
   const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-  // Count recorded days per "YYYY-MM"
+  // Count days with actual (non-null) values per "YYYY-MM"
   const recorded = {};
-  dates.forEach(d => {
-    const k = d.slice(0, 7);
-    recorded[k] = (recorded[k] ?? 0) + 1;
+  dates.forEach((d, i) => {
+    if (data.values[i] !== null) {
+      const k = d.slice(0, 7);
+      recorded[k] = (recorded[k] ?? 0) + 1;
+    }
   });
 
   // All years in data, newest first
@@ -1186,6 +1322,11 @@ function loadMissingDaysTab() {
   // Days in a given month (1-based)
   const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
 
+  // Bound expected range to first/last month that actually appear in the data
+  const allMonths  = [...new Set(dates.map(d => d.slice(0, 7)))].sort();
+  const [firstYr, firstMo] = allMonths[0].split("-").map(Number);
+  const [lastYr,  lastMo]  = allMonths[allMonths.length - 1].split("-").map(Number);
+
   let grandMissing = 0, grandExpected = 0;
 
   const rows = years.map(yr => {
@@ -1193,12 +1334,19 @@ function loadMissingDaysTab() {
     const cells = [];
 
     for (let mo = 1; mo <= 12; mo++) {
+      // Skip months outside the station's actual operating range
+      if (yr === firstYr && mo < firstMo) { cells.push(`<td class="miss-none"></td>`); continue; }
+      if (yr === lastYr  && mo > lastMo)  { cells.push(`<td class="miss-none"></td>`); continue; }
+
       const key     = `${yr}-${String(mo).padStart(2, "0")}`;
       const expected = dim(yr, mo);
       const present  = recorded[key] ?? 0;
 
       if (present === 0) {
-        cells.push(`<td class="miss-none">—</td>`);
+        // Entire month absent — all days are missing
+        yrMissing  += expected;
+        yrExpected += expected;
+        cells.push(`<td class="miss-gap">—</td>`);
         continue;
       }
 
@@ -1242,6 +1390,416 @@ function loadMissingDaysTab() {
     </div>
   `;
 }
+
+// ── AMS Tab ───────────────────────────────────────────────────────────────────
+function computeAMS(maxMissing) {
+  const data = App.stationData;
+  if (!data?.dates?.length) return [];
+
+  const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
+
+  const allMonths = [...new Set(data.dates.map(d => d.slice(0, 7)))].sort();
+  const [firstYr, firstMo] = allMonths[0].split("-").map(Number);
+  const [lastYr,  lastMo]  = allMonths[allMonths.length - 1].split("-").map(Number);
+
+  const recorded = {};
+  const byYear   = {};
+  data.dates.forEach((d, i) => {
+    const yr = parseInt(d.slice(0, 4));
+    const mo = parseInt(d.slice(5, 7));
+    const v  = data.values[i];
+    if (!byYear[yr]) byYear[yr] = [];
+    byYear[yr].push(v);
+    if (v !== null) {
+      const k = d.slice(0, 7);
+      recorded[k] = (recorded[k] ?? 0) + 1;
+    }
+  });
+
+  const years = Object.keys(byYear).map(Number).sort((a, b) => a - b);
+  const ams = [];
+
+  for (const yr of years) {
+    let missing = 0, expected = 0;
+    for (let mo = 1; mo <= 12; mo++) {
+      if (yr === firstYr && mo < firstMo) continue;
+      if (yr === lastYr  && mo > lastMo)  continue;
+      const pres = recorded[`${yr}-${String(mo).padStart(2,"0")}`] ?? 0;
+      const e = dim(yr, mo);
+      expected += e;
+      missing  += Math.max(0, e - pres);
+    }
+    const vals = byYear[yr].filter(v => v !== null);
+    if (!vals.length) continue;
+    const maxVal = Math.max(...vals);
+    ams.push({ yr, maxVal, missing, excluded: missing > maxMissing });
+  }
+
+  // Sort by value desc for plotting positions
+  const included = ams.filter(r => !r.excluded).sort((a, b) => b.maxVal - a.maxVal);
+  const N = included.length;
+  included.forEach((r, i) => {
+    r.rank = i + 1;
+    r.ari  = round1((N + 1) / (i + 1));
+    r.aep  = Math.round((i + 1) / (N + 1) * 1000) / 1000;
+  });
+
+  return ams; // excluded ones have no rank/ari/aep
+}
+
+function loadAMSTab() {
+  const tableArea = document.getElementById("ams-table-area");
+  const info      = document.getElementById("ams-info");
+  if (!App.stationData?.dates?.length) return;
+
+  const thresh   = parseInt(document.getElementById("ams-threshold")?.value ?? 30);
+  App.amsThreshold = thresh;
+
+  const ams      = computeAMS(thresh);
+  const included = ams.filter(r => !r.excluded);
+  const excluded = ams.filter(r => r.excluded);
+  if (info) info.textContent = `${included.length} included, ${excluded.length} excluded`;
+
+  const allRows = [...ams].sort((a, b) => a.yr - b.yr);
+
+  if (!allRows.length) {
+    tableArea.innerHTML = '<div class="empty-msg"><div class="big-icon">⚠️</div>No data</div>';
+    return;
+  }
+
+  tableArea.innerHTML = `
+    <table class="ams-table">
+      <thead><tr>
+        <th>Year</th><th>Max Daily (mm)</th>
+      </tr></thead>
+      <tbody>
+        ${allRows.map(r => r.excluded
+          ? `<tr class="ams-excl" title="${r.missing} missing days — excluded">
+               <td>${r.yr}</td><td>${r.maxVal} ⚠</td>
+             </tr>`
+          : `<tr><td>${r.yr}</td><td>${r.maxVal}</td></tr>`
+        ).join("")}
+      </tbody>
+    </table>`;
+}
+
+// ── IFD Chart Tab ─────────────────────────────────────────────────────────────
+// Converts a BOM duration label to minutes
+function _durToMins(label) {
+  const s = label.trim().toLowerCase();
+  const n = parseFloat(s);
+  if (s.includes("min"))  return n;
+  if (s.includes("hour")) return n * 60;
+  if (s.includes("day"))  return n * 1440;
+  return null;
+}
+
+// Colour palette for AEP curves (warm → cool, matching rarity)
+const IFD_CURVE_COLORS = {
+  "63.2%": "#27ae60", "50%": "#2ecc71", "20%": "#f1c40f",
+  "10%":   "#e67e22", "5%": "#e74c3c", "2%": "#c0392b", "1%": "#8e44ad",
+};
+
+function loadIFDChart() {
+  const area = document.getElementById("ifd-chart-area");
+  if (!App.ifdData) {
+    area.innerHTML = '<div class="empty-msg"><div class="big-icon">📐</div>IFD data unavailable</div>';
+    return;
+  }
+
+  const ifd      = App.ifdData;
+  const durations = ifd.durations  ?? [];
+  const aepCols   = ifd.aep_cols   ?? [];
+  const table     = ifd.table      ?? {};
+
+  if (!durations.length) {
+    area.innerHTML = '<div class="empty-msg"><div class="big-icon">📐</div>No duration data in IFD response</div>';
+    return;
+  }
+
+  // Duration x-axis in minutes (log scale)
+  const durMins = durations.map(_durToMins);
+
+  const bg = plotBg();
+  const traces = [];
+
+  // One line per AEP — depth (mm) vs duration (minutes), matching BOM chart convention
+  aepCols.forEach(aep => {
+    const color = IFD_CURVE_COLORS[aep] ?? "#999";
+    const yDepth = durations.map(dur => table[dur]?.[aep] ?? null);
+    traces.push({
+      x: durMins,
+      y: yDepth,
+      mode: "lines+markers",
+      type: "scatter",
+      name: `AEP ${aep}`,
+      line:   { color, width: 1.8 },
+      marker: { color, size: 4 },
+      hovertemplate: `<b>AEP ${aep}</b><br>Duration: %{text}<br>Depth: %{y} mm<extra></extra>`,
+      text: durations,
+    });
+  });
+
+  // Duration tick labels for x-axis
+  const tickVals = [1, 5, 10, 30, 60, 120, 360, 720, 1440, 4320, 10080];
+  const tickText = ["1m","5m","10m","30m","1h","2h","6h","12h","24h","3d","7d"];
+
+  Plotly.react("ifd-chart-area", traces, {
+    margin: { t: 16, r: 10, b: 56, l: 62 },
+    paper_bgcolor: bg.paper, plot_bgcolor: bg.plot,
+    xaxis: {
+      type: "log", title: "Duration",
+      gridcolor: bg.grid,
+      tickvals: tickVals, ticktext: tickText, tickangle: -30,
+    },
+    yaxis: { title: "Rainfall Depth (mm)", gridcolor: bg.grid, zeroline: false },
+    legend: { orientation: "h", y: -0.22, font: { size: 9 }, tracegroupgap: 0 },
+    font: { family: "Inter, sans-serif", size: 11, color: bg.text },
+    hovermode: "closest",
+  }, { responsive: true, displayModeBar: false });
+}
+
+// ── Cumulative Tab ─────────────────────────────────────────────────────────────
+function loadCumulativeTab() {
+  const area = document.getElementById("cumulative-chart-area");
+  const data = App.stationData;
+  if (!data?.dates?.length) return;
+
+  // Step 1: compute mean rainfall per DOY (1–366) across the full record
+  const doySum   = new Array(367).fill(0);
+  const doyCount = new Array(367).fill(0);
+  data.dates.forEach((d, i) => {
+    const v = data.values[i];
+    if (v === null) return;
+    const dt  = new Date(d);
+    const doy = Math.floor((dt - new Date(dt.getFullYear(), 0, 0)) / 86400000);
+    if (doy >= 1 && doy <= 366) { doySum[doy] += v; doyCount[doy]++; }
+  });
+  const doyMean = doySum.map((s, i) => doyCount[i] > 0 ? s / doyCount[i] : 0);
+
+  // Step 2: accumulate (actual − mean) over the year-filtered record
+  const [y1, y2] = App.yearRange;
+  const dates   = [];
+  const cumVals = [];
+  let cumSum = 0;
+
+  data.dates.forEach((d, i) => {
+    const yr = parseInt(d.slice(0, 4));
+    if (yr < y1 || yr > y2) return;
+    const v   = data.values[i] ?? 0;
+    const dt  = new Date(d);
+    const doy = Math.floor((dt - new Date(dt.getFullYear(), 0, 0)) / 86400000);
+    const mean = (doy >= 1 && doy <= 366) ? doyMean[doy] : 0;
+    cumSum += v - mean;
+    dates.push(d);
+    cumVals.push(round1(cumSum));
+  });
+
+  const bg = plotBg();
+  Plotly.react("cumulative-chart-area", [{
+    x: dates, y: cumVals,
+    mode: "lines", type: "scatter",
+    line: { color: "#1a6eb5", width: 1.5 },
+    hovertemplate: "%{x}<br>Anomaly: %{y} mm<extra></extra>",
+  }], {
+    margin: { t: 10, r: 10, b: 46, l: 60 },
+    paper_bgcolor: bg.paper, plot_bgcolor: bg.plot,
+    xaxis: { gridcolor: bg.grid, showgrid: false },
+    yaxis: {
+      title: "Cumulative Rainfall Anomaly (mm)",
+      gridcolor: bg.grid, zeroline: true, zerolinecolor: bg.zero,
+    },
+    shapes: [{
+      type: "line", xref: "paper", x0: 0, x1: 1,
+      yref: "y", y0: 0, y1: 0,
+      line: { color: bg.grid, width: 1, dash: "dot" },
+    }],
+    showlegend: false,
+    font: { family: "Inter, sans-serif", size: 11, color: bg.text },
+  }, { responsive: true, displayModeBar: false });
+}
+
+// ── Download Modal ─────────────────────────────────────────────────────────────
+window.openDownloadModal = function() {
+  if (!App.selected) return;
+  document.getElementById("dl-modal-title").textContent =
+    `⬇ Download — #${App.selected.id} ${App.selected.name}`;
+  const ifdChk = document.getElementById("dlm-ifd");
+  if (ifdChk) ifdChk.disabled = !App.ifdData;
+  document.getElementById("dl-modal-overlay").classList.add("open");
+};
+
+window.closeDownloadModal = function(e) {
+  if (e && e.target !== document.getElementById("dl-modal-overlay")) return;
+  document.getElementById("dl-modal-overlay").classList.remove("open");
+};
+
+function downloadCSVBlob(content, filename) {
+  const blob = new Blob(["﻿" + content], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function genMonthlyCSV() {
+  const data = App.stationData;
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monthly = {};
+  data.dates.forEach((d, i) => {
+    const yr = parseInt(d.slice(0,4)), mo = parseInt(d.slice(5,7));
+    const v  = data.values[i];
+    if (!monthly[yr]) monthly[yr] = {};
+    monthly[yr][mo] = (monthly[yr][mo] ?? 0) + (v ?? 0);
+  });
+  let csv = "Year," + MONTHS.join(",") + ",Annual_Total\n";
+  Object.keys(monthly).map(Number).sort((a,b)=>a-b).forEach(yr => {
+    const vals = MONTHS.map((_,i) => round1(monthly[yr]?.[i+1] ?? ""));
+    const tot  = round1(vals.reduce((s,v) => s + (Number(v)||0), 0));
+    csv += `${yr},${vals.join(",")},${tot}\n`;
+  });
+  return csv;
+}
+
+function genAnnualCSV() {
+  const data = App.stationData;
+  const dim  = (yr, mo) => new Date(yr, mo, 0).getDate();
+  const recorded = {}, annual = {};
+  data.dates.forEach((d, i) => {
+    const yr = parseInt(d.slice(0,4)), mo = parseInt(d.slice(5,7));
+    const v  = data.values[i];
+    annual[yr] = (annual[yr] ?? 0) + (v ?? 0);
+    if (v !== null) {
+      const k = d.slice(0,7); recorded[k] = (recorded[k] ?? 0) + 1;
+    }
+  });
+  const allMonths = [...new Set(data.dates.map(d=>d.slice(0,7)))].sort();
+  const [fy, fm] = allMonths[0].split("-").map(Number);
+  const [ly, lm] = allMonths[allMonths.length-1].split("-").map(Number);
+  let csv = "Year,Annual_Total_mm,Missing_days\n";
+  Object.keys(annual).map(Number).sort((a,b)=>a-b).forEach(yr => {
+    let miss=0, exp=0;
+    for (let mo=1;mo<=12;mo++) {
+      if (yr===fy && mo<fm) continue;
+      if (yr===ly && mo>lm) continue;
+      const pres = recorded[`${yr}-${String(mo).padStart(2,"0")}`] ?? 0;
+      const e = dim(yr, mo); exp += e; miss += Math.max(0, e-pres);
+    }
+    csv += `${yr},${round1(annual[yr])},${miss}\n`;
+  });
+  return csv;
+}
+
+function genMissingCSV() {
+  const data = App.stationData;
+  const dim  = (yr, mo) => new Date(yr, mo, 0).getDate();
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const recorded = {};
+  data.dates.forEach((d, i) => {
+    if (data.values[i] !== null) { const k=d.slice(0,7); recorded[k]=(recorded[k]??0)+1; }
+  });
+  const allMonths = [...new Set(data.dates.map(d=>d.slice(0,7)))].sort();
+  const [fy,fm] = allMonths[0].split("-").map(Number);
+  const [ly,lm] = allMonths[allMonths.length-1].split("-").map(Number);
+  const years = [...new Set(data.dates.map(d=>+d.slice(0,4)))].sort((a,b)=>a-b);
+  let csv = "Year," + MONTHS.join(",") + ",Total_Missing\n";
+  years.forEach(yr => {
+    let tot = 0;
+    const vals = MONTHS.map((_,mi) => {
+      const mo = mi+1;
+      if (yr===fy && mo<fm) return "";
+      if (yr===ly && mo>lm) return "";
+      const k = `${yr}-${String(mo).padStart(2,"0")}`;
+      const pres = recorded[k] ?? 0;
+      const miss = Math.max(0, dim(yr,mo)-pres);
+      tot += miss;
+      return miss;
+    });
+    csv += `${yr},${vals.join(",")},${tot}\n`;
+  });
+  return csv;
+}
+
+function genAMSCSV(thresh) {
+  const ams = computeAMS(thresh);
+  let csv = "Year,Annual_Max_mm,Rank,ARI_years,AEP,Missing_days,Excluded\n";
+  ams.sort((a,b)=>a.yr-b.yr).forEach(r => {
+    csv += `${r.yr},${r.maxVal},${r.rank??''},${r.ari??''},${r.aep??''},${r.missing},${r.excluded?'yes':'no'}\n`;
+  });
+  return csv;
+}
+
+function genIFDCSV() {
+  if (!App.ifdData) return "";
+  const ifd       = App.ifdData;
+  const durations = ifd.durations ?? [];
+  const aepCols   = ifd.aep_cols  ?? [];
+  const table     = ifd.table     ?? {};
+  if (!durations.length) return "";
+
+  const depthHdrs = aepCols.map(a => `Depth_${a}_mm`);
+  const intHdrs   = aepCols.map(a => `Intensity_${a}_mmhr`);
+  let csv = `Duration,Duration_min,${depthHdrs.join(",")},${intHdrs.join(",")}\n`;
+
+  durations.forEach(dur => {
+    const mins   = _durToMins(dur) ?? "";
+    const depths = aepCols.map(a => table[dur]?.[a] ?? "");
+    const ints   = aepCols.map(a => {
+      const d = table[dur]?.[a];
+      const m = typeof mins === "number" ? mins : null;
+      return (d != null && m) ? Math.round(d / m * 60 * 10) / 10 : "";
+    });
+    csv += `${dur},${mins},${depths.join(",")},${ints.join(",")}\n`;
+  });
+  return csv;
+}
+
+window.triggerModalDownloads = async function() {
+  const btn = document.getElementById("dl-modal-go-btn");
+  btn.disabled = true;
+  btn.textContent = "Downloading…";
+
+  const stn      = App.selected;
+  const id       = stn?.id ?? "station";
+  const name     = (stn?.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
+  const base     = `${id}_${name}`;
+  const dist     = document.getElementById("dl-distribute")?.checked ?? true;
+  const thresh   = parseInt(document.getElementById("dlm-ams-thresh")?.value ?? 30);
+
+  try {
+    if (document.getElementById("dlm-daily")?.checked) {
+      const url = `${API}/api/export/${id}/csv?distribute=${dist}`;
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const fn = res.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${base}_daily.csv`;
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = fn; a.click();
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (document.getElementById("dlm-monthly")?.checked) {
+      downloadCSVBlob(genMonthlyCSV(), `${base}_monthly.csv`);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (document.getElementById("dlm-annual")?.checked) {
+      downloadCSVBlob(genAnnualCSV(), `${base}_annual.csv`);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (document.getElementById("dlm-missing")?.checked) {
+      downloadCSVBlob(genMissingCSV(), `${base}_missing.csv`);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (document.getElementById("dlm-ams")?.checked) {
+      downloadCSVBlob(genAMSCSV(thresh), `${base}_ams.csv`);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (document.getElementById("dlm-ifd")?.checked && App.ifdData) {
+      downloadCSVBlob(genIFDCSV(), `${base}_ifd.csv`);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Download CSVs";
+    closeDownloadModal();
+  }
+};
 
 // ── Loading overlay ───────────────────────────────────────────────────────────
 function showLoading(areaOrId) {
@@ -1552,20 +2110,7 @@ document.getElementById("monthly-month-select").addEventListener("change", e => 
   if (App.stationData && App.activeTab === "monthly") loadMonthlyChart();
 });
 
-// ── Download tab buttons ──────────────────────────────────────────────────────
-document.getElementById("dl-csv-btn").addEventListener("click", () => {
-  if (!App.selected) return;
-  const distribute = document.getElementById("dl-distribute").checked;
-  const url = `${API}/api/export/${App.selected.id}/csv?distribute=${distribute}`;
-  triggerDownload(url);
-});
-
-document.getElementById("dl-xlsx-btn").addEventListener("click", () => {
-  if (!App.selected) return;
-  const distribute = document.getElementById("dl-distribute").checked;
-  const url = `${API}/api/export/${App.selected.id}/xlsx?distribute=${distribute}`;
-  triggerDownload(url);
-});
+// Download tab now uses the modal — dl-csv-btn and dl-xlsx-btn removed from HTML.
 
 function triggerDownload(url) {
   const statusEl = document.getElementById("dl-status");
@@ -1787,6 +2332,48 @@ function initPanelResize() {
 
   attachDrag("sidebar-sizer", "sidebar");
   attachDrag("rpanel-sizer",  "rpanel");
+
+  // Detail panel vertical resize
+  const KEY_PH = "rf-panel-h";
+  const MIN_H  = 150;
+  const MAX_H  = 750;
+  const rawPh  = localStorage.getItem(KEY_PH);
+  if (rawPh !== null) root.style.setProperty("--panel-h", +rawPh + "px");
+
+  const detailSizer = document.getElementById("detail-panel-sizer");
+  if (detailSizer) {
+    detailSizer.addEventListener("mousedown", e => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = parseInt(getComputedStyle(root).getPropertyValue("--panel-h")) || 430;
+      detailSizer.classList.add("dragging");
+      document.body.style.cursor    = "row-resize";
+      document.body.style.userSelect = "none";
+
+      function onMove(ev) {
+        const newH = Math.max(MIN_H, Math.min(MAX_H, startH + (startY - ev.clientY)));
+        root.style.setProperty("--panel-h", newH + "px");
+        localStorage.setItem(KEY_PH, newH);
+        if (App.map) App.map.invalidateSize();
+        ["daily-chart-area", "monthly-chart-area", "annual-chart-area", "compare-chart-area",
+         "ams-chart-area", "ifd-chart-area", "cumulative-chart-area"].forEach(id => {
+          const el = document.getElementById(id);
+          if (el?._fullLayout) Plotly.Plots.resize(el);
+        });
+      }
+
+      function onUp() {
+        detailSizer.classList.remove("dragging");
+        document.body.style.cursor    = "";
+        document.body.style.userSelect = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup",   onUp);
+      }
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup",   onUp);
+    });
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

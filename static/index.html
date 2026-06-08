@@ -81,8 +81,8 @@
       <div id="loc-status"></div>
       <div class="range-row" style="margin-top:8px">
         <label>Radius</label>
-        <input type="range" id="radius-slider" min="25" max="500" step="25" value="100">
-        <span class="range-val"><span id="radius-val">100</span> km</span>
+        <input type="range" id="radius-slider" min="5" max="500" step="5" value="10">
+        <span class="range-val"><span id="radius-val">10</span> km</span>
       </div>
     </div>
 
@@ -110,6 +110,9 @@
       <div id="map"></div>
     </div>
 
+    <!-- ── Detail Panel Sizer ───────────────────────────── -->
+    <div id="detail-panel-sizer"></div>
+
     <!-- ── Detail Panel ─────────────────────────────────── -->
     <div id="detail-panel">
       <div class="panel-header">
@@ -132,6 +135,9 @@
         <button class="tab-btn" data-tab="monthly">Monthly</button>
         <button class="tab-btn" data-tab="annual">Annual</button>
         <button class="tab-btn" data-tab="missing">Missing</button>
+        <button class="tab-btn" data-tab="ams">AMS</button>
+        <button class="tab-btn" data-tab="ifd-chart">IFD</button>
+        <button class="tab-btn" data-tab="cumulative">Cumulative</button>
         <button class="tab-btn" data-tab="download">Download</button>
       </div>
 
@@ -245,37 +251,52 @@
           </div>
         </div>
 
+        <!-- AMS tab -->
+        <div class="tab-content" id="tab-ams">
+          <div class="ams-controls">
+            <label>Exclude years with &gt;</label>
+            <input type="number" id="ams-threshold" value="30" min="0" max="365" step="1">
+            <label>missing days</label>
+            <button class="ams-update-btn" onclick="loadAMSTab()">Apply</button>
+            <span id="ams-info" style="font-size:.78em;color:var(--text-muted)"></span>
+          </div>
+          <div id="ams-table-area" class="ams-table-area">
+            <div class="empty-msg"><div class="big-icon">📈</div>Select a station</div>
+          </div>
+        </div>
+
+        <!-- IFD chart tab -->
+        <div class="tab-content" id="tab-ifd-chart">
+          <div class="chart-area" id="ifd-chart-area">
+            <div class="empty-msg"><div class="big-icon">📐</div>Select a station to load IFD</div>
+          </div>
+        </div>
+
+        <!-- Cumulative tab -->
+        <div class="tab-content" id="tab-cumulative">
+          <div class="chart-area" id="cumulative-chart-area">
+            <div class="empty-msg"><div class="big-icon">📉</div>Select a station</div>
+          </div>
+        </div>
+
         <!-- Download tab -->
         <div class="tab-content" id="tab-download">
           <div class="download-tab-body">
-
-            <!-- ── Single-station ── -->
             <div class="dl-card">
-              <div class="dl-section-hd">⬇ This Station</div>
+              <div class="dl-section-hd">⬇ Export — This Station</div>
               <div class="dl-option-row">
                 <input type="checkbox" id="dl-distribute" checked>
                 <label for="dl-distribute">Distribute accumulated rainfall across days</label>
               </div>
-              <div class="dl-btn-row">
-                <button class="dl-btn" id="dl-csv-btn">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                  </svg>
-                  CSV
-                </button>
-                <button class="dl-btn outline" id="dl-xlsx-btn">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
-                  </svg>
-                  XLSX (3 sheets)
-                </button>
-              </div>
-              <div id="dl-status" style="font-size:.8em;color:var(--text-muted);margin-top:4px"></div>
+              <button class="dl-btn" style="margin-top:8px" onclick="openDownloadModal()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Choose what to download…
+              </button>
+              <div id="dl-status" style="font-size:.8em;color:var(--text-muted);margin-top:6px"></div>
             </div>
-
           </div>
         </div>
 
@@ -391,6 +412,35 @@
     </div>
 
   </aside>
+
+<!-- ── Download Modal ───────────────────────────────────── -->
+<div id="dl-modal-overlay" class="dl-modal-overlay" onclick="closeDownloadModal(event)">
+  <div class="dl-modal">
+    <div class="dl-modal-header">
+      <span id="dl-modal-title">⬇ Download</span>
+      <button class="dl-modal-close" onclick="closeDownloadModal()">✕</button>
+    </div>
+    <div class="dl-modal-body">
+      <div class="dl-modal-section">What to export:</div>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-daily"   checked> Daily rainfall</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-monthly" checked> Monthly pivot table</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-annual"  checked> Annual pivot table</label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-missing" checked> Missing days pivot</label>
+      <label class="dl-modal-row">
+        <input type="checkbox" id="dlm-ams" checked> AMS (Annual Maximum Series)
+        <span style="color:var(--text-muted);font-size:.8em;margin-left:6px">
+          max missing <input type="number" id="dlm-ams-thresh" value="30" min="0" max="365"
+            style="width:44px;padding:1px 4px;font-size:.8em;border:1px solid var(--border);border-radius:3px;background:var(--bg)"> days/yr
+        </span>
+      </label>
+      <label class="dl-modal-row"><input type="checkbox" id="dlm-ifd"> IFD table (24-hr, BOM 2016)</label>
+    </div>
+    <div class="dl-modal-footer">
+      <button class="dl-btn" id="dl-modal-go-btn" onclick="triggerModalDownloads()">Download CSVs</button>
+      <button class="dl-btn outline" onclick="closeDownloadModal()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 </div><!-- app -->
 

@@ -1,0 +1,5 @@
+you are a hydrologist
+you are looking for three station
+you are interested in the daily rainfall and the IFD of each station
+you do batch download for daily rainfall, monthly pivot, annual pivot, missing day pivot, AMS, and their IFD curves
+you fav these three for next visit

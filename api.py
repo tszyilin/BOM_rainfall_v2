@@ -615,6 +615,21 @@ def get_ifd(lat: float, lon: float):
     return result
 
 
+def _dur_to_minutes(label: str) -> float | None:
+    """Convert a BOM duration label like '30 min' or '1.5 hour' to minutes."""
+    s = label.strip().lower()
+    try:
+        if "min" in s:
+            return float(re.search(r"[\d.]+", s).group())
+        if "hour" in s or " h" in s or s.endswith("h"):
+            return float(re.search(r"[\d.]+", s).group()) * 60
+        if "day" in s:
+            return float(re.search(r"[\d.]+", s).group()) * 1440
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_ifd(lat: float, lon: float) -> dict:
     base_url = "https://www.bom.gov.au/water/designRainfalls/revised-ifd/"
     post_url = base_url + "?multipoint"
@@ -666,25 +681,43 @@ def _fetch_ifd(lat: float, lon: float) -> dict:
 
         df.columns = [re.sub(r"[#*†‡]+$", "", c).strip() for c in df.columns]
 
-        # Find 24-hour row
-        dur_24 = None
-        for idx in df.index:
-            s = idx.lower()
-            if "24" in s and any(t in s for t in ("hr", "hour", " h")):
-                dur_24 = idx
-                break
-        if dur_24 is None:
-            return {"_error": "24-hour duration row not found"}
+        # AEP columns present in the table
+        aep_cols = list(df.columns)
 
-        result = {}
-        for col, val in df.loc[dur_24].items():
-            try:
-                f = float(val)
-                if not pd.isna(f):
-                    result[str(col).strip()] = round(f, 1)
-            except (ValueError, TypeError):
-                pass
-        return result or {"_error": "No IFD values extracted"}
+        # Build full duration table — skip winter-factor rows
+        durations = []
+        table: dict[str, dict[str, float]] = {}
+        dur_24_key = None
+
+        for idx in df.index:
+            mins = _dur_to_minutes(idx)
+            if mins is None:
+                continue  # skip winter factors and unparseable rows
+            row_data: dict[str, float] = {}
+            for col in aep_cols:
+                try:
+                    f = float(df.loc[idx, col])
+                    if not pd.isna(f):
+                        row_data[str(col).strip()] = round(f, 1)
+                except (ValueError, TypeError):
+                    pass
+            if not row_data:
+                continue
+            durations.append(idx)
+            table[idx] = row_data
+            if mins == 1440:          # 24-hour row
+                dur_24_key = idx
+
+        if not durations:
+            return {"_error": "No IFD values extracted"}
+
+        # Build result — flat 24-hr values at top level for backwards compat
+        result: dict = {"durations": durations, "aep_cols": aep_cols, "table": table}
+        ref_row = dur_24_key or durations[-1]
+        for col, val in table[ref_row].items():
+            result[col] = val          # e.g. result["50%"] = 112.0
+
+        return result
 
     except Exception as e:
         return {"_error": str(e)}
@@ -725,24 +758,59 @@ def _geocode(query: str):
     q = query.strip()
     db = _postcode_db()
 
-    # Postcode
+    # Postcode-only
     if q.isdigit():
         rows = db[db["postcode"] == q.zfill(4)]
         if not rows.empty:
             r = rows.iloc[0]
             return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']} {r['postcode']}"
 
-    # Locality exact then partial
+    # Build a list of candidate locality strings to try, in priority order.
+    # Handles typed autocomplete labels like "Orange, NSW 2800" or "Orange, NSW".
+    candidates: list[str] = [q]
+    # Strip trailing postcode:  "Orange, NSW 2800" → "Orange, NSW"
+    stripped_pc = re.sub(r",?\s+\d{4}\s*$", "", q).strip()
+    if stripped_pc and stripped_pc != q:
+        candidates.append(stripped_pc)
+    # Strip trailing ", STATE":  "Orange, NSW" → "Orange"
+    stripped_state = re.sub(r",?\s+[A-Z]{2,3}\s*$", "", stripped_pc or q).strip()
+    if stripped_state and stripped_state not in candidates:
+        candidates.append(stripped_state)
+    # Also try just the postcode if the query contains one
+    m_pc = re.search(r"\b(\d{4})\b", q)
+    if m_pc:
+        candidates.append(m_pc.group(1))
+
+    # State filter if present in query
+    m_state = re.search(r"\b(NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\b", q, re.IGNORECASE)
+    state_filter = m_state.group(1).upper() if m_state else None
+
     try:
-        ql = q.lower()
-        exact = db[db["locality"].str.lower() == ql]
-        if not exact.empty:
-            r = exact.iloc[0]
-            return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']}, Australia"
-        partial = db[db["locality"].str.lower().str.contains(ql, regex=False, na=False)]
-        if not partial.empty:
-            r = partial.iloc[0]
-            return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']}, Australia"
+        for candidate in candidates:
+            cl = candidate.lower()
+            # Postcode candidate
+            if cl.isdigit():
+                rows = db[db["postcode"] == cl.zfill(4)]
+                if state_filter:
+                    rows = rows[rows["state"].str.upper() == state_filter]
+                if not rows.empty:
+                    r = rows.iloc[0]
+                    return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']} {r['postcode']}"
+                continue
+            # Exact locality match
+            exact = db[db["locality"].str.lower() == cl]
+            if state_filter:
+                exact = exact[exact["state"].str.upper() == state_filter]
+            if not exact.empty:
+                r = exact.iloc[0]
+                return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']}, Australia"
+            # Partial locality match
+            partial = db[db["locality"].str.lower().str.contains(cl, regex=False, na=False)]
+            if state_filter:
+                partial = partial[partial["state"].str.upper() == state_filter]
+            if not partial.empty:
+                r = partial.iloc[0]
+                return float(r["lat"]), float(r["long"]), f"{r['locality'].title()}, {r['state']}, Australia"
     except Exception:
         pass
 
