@@ -241,9 +241,29 @@ async function loadStations() {
     App.allStations = await apiFetch("/api/stations");
     App.filtered = [...App.allStations];
     addAllMarkers(App.allStations);
-    renderFavList();   // restore saved favourites now that station list is ready
+    renderFavList();
+    prefetchFavLatest();   // populate latest readings in background
   } catch (e) {
     console.error("Failed to load stations:", e);
+  }
+}
+
+// Silently fetch the latest reading for each saved favourite so it appears on load
+async function prefetchFavLatest() {
+  for (const id of App.favourites) {
+    try {
+      const data = await apiFetch(`/api/stations/${id}/data`);
+      const dates  = data.dates  ?? [];
+      const values = data.values ?? [];
+      let latestVal = null, latestDate = null;
+      for (let i = dates.length - 1; i >= 0; i--) {
+        if (values[i] != null) { latestVal = values[i]; latestDate = dates[i]; break; }
+      }
+      if (latestDate) {
+        App.latestCache[id] = { val: latestVal, date: latestDate };
+        renderFavList();
+      }
+    } catch {}  // skip silently if a station fails
   }
 }
 
