@@ -241,6 +241,7 @@ async function loadStations() {
     App.allStations = await apiFetch("/api/stations");
     App.filtered = [...App.allStations];
     addAllMarkers(App.allStations);
+    renderFavList();   // restore saved favourites now that station list is ready
   } catch (e) {
     console.error("Failed to load stations:", e);
   }
