@@ -79,7 +79,7 @@ const App = {
   favourites:   new Set(JSON.parse(localStorage.getItem("rf-favs") ?? "[]")),
   refLines:     JSON.parse(localStorage.getItem("rf-reflines") ?? "[]"),
   ifdChecked:   JSON.parse(localStorage.getItem("rf-ifd-checked") ?? "{}"),
-  filters: { state: "", activeOnly: false, minPct: 0, radius: 10 },
+  filters: { state: "", activeOnly: false, minPct: 0, radius: 100 },
   locationPin:  null,
   chartType:    "bar",   // 'bar' or 'line'
   yearRange:    [null, null],
