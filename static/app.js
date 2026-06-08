@@ -646,8 +646,11 @@ async function loadStationData(id) {
         ? `${latestVal} mm (${latestDate.slice(8,10)}/${latestDate.slice(5,7)}/${latestDate.slice(0,4)})`
         : "—";
 
-      // Cache for fav list display
-      if (latestDate) App.latestCache[id] = { val: latestVal, date: latestDate };
+      // Cache for fav list display — refresh the list so latest reading appears immediately
+      if (latestDate) {
+        App.latestCache[id] = { val: latestVal, date: latestDate };
+        renderFavList();
+      }
 
       document.getElementById("panel-meta").innerHTML =
         buildPanelMeta(latStr, lonStr, openedStr, period, latestStr);
@@ -1039,7 +1042,15 @@ window.addRefLine = function() {
   renderRefLines();
   document.getElementById("ref-val").value = "";
   document.getElementById("ref-lbl").value = "";
-  if (App.activeTab === "daily" && App.stationData) loadDailyChart();
+  if (App.activeTab === "daily" && App.stationData) {
+    loadDailyChart();
+  } else if (!App.stationData) {
+    // Show brief hint so user knows the line was saved
+    const hdr = document.getElementById("ref-header-text");
+    const orig = hdr.textContent;
+    hdr.textContent = "📏 Line saved — select a station to display";
+    setTimeout(() => renderRefLines(), 2000);
+  }
 };
 
 window.removeRefLine = function(i) {
