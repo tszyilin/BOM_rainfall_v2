@@ -1120,6 +1120,11 @@ window.toggleExpander = function(which) {
   const body = document.getElementById(`${which}-body`);
   const open = body.classList.toggle("open");
   hdr.classList.toggle("open", open);
+  // Resize the daily chart after the CSS transition settles
+  setTimeout(() => {
+    const gd = document.getElementById("daily-chart-area");
+    if (gd?._fullLayout) Plotly.Plots.resize(gd);
+  }, 50);
 };
 
 // ── Monthly Chart ─────────────────────────────────────────────────────────────
