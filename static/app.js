@@ -101,6 +101,7 @@ const App = {
   // Feature additions
   latestCache:  {},      // {stationId: {val, date}}
   amsThreshold: 30,
+  yearType:     "cal",  // 'cal' | 'jul' | 'oct'
 };
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -1257,29 +1258,33 @@ function loadAnnualChart() {
   const data = App.stationData;
   if (!data?.dates?.length) return;
 
+  const yearType = App.yearType ?? "cal";
   const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
-
-  // Aggregate daily → annual rainfall + count days with real values per month
-  const annual   = {};
-  const recorded = {};  // {year: {month: non-null day count}}
-  data.dates.forEach((d, i) => {
-    const yr = parseInt(d.slice(0, 4));
-    const mo = parseInt(d.slice(5, 7));
-    const v  = data.values[i];
-    annual[yr] = (annual[yr] ?? 0) + (v ?? 0);
-    if (!recorded[yr]) recorded[yr] = {};
-    if (v !== null) recorded[yr][mo] = (recorded[yr][mo] ?? 0) + 1;
-  });
 
   const allMonths  = [...new Set(data.dates.map(d => d.slice(0, 7)))].sort();
   const [firstYr, firstMo] = allMonths[0].split("-").map(Number);
   const [lastYr,  lastMo]  = allMonths[allMonths.length - 1].split("-").map(Number);
 
-  function annualMissing(yr) {
+  // Aggregate daily → period totals + count non-null days by calendar month
+  const annual   = {};  // periodKey -> total mm
+  const labels   = {};  // periodKey -> display label
+  const recorded = {};  // calYear -> {calMonth: non-null count}
+  data.dates.forEach((d, i) => {
+    const { key, label } = yearKeyInfo(d, yearType);
+    const yr = parseInt(d.slice(0, 4));
+    const mo = parseInt(d.slice(5, 7));
+    const v  = data.values[i];
+    annual[key] = (annual[key] ?? 0) + (v ?? 0);
+    labels[key] = label;
+    if (!recorded[yr]) recorded[yr] = {};
+    if (v !== null) recorded[yr][mo] = (recorded[yr][mo] ?? 0) + 1;
+  });
+
+  function annualMissing(key) {
     let missing = 0, expected = 0;
-    for (let mo = 1; mo <= 12; mo++) {
-      if (yr === firstYr && mo < firstMo) continue;
-      if (yr === lastYr  && mo > lastMo)  continue;
+    for (const { yr, mo } of yearPeriodMonths(key, yearType)) {
+      if (yr < firstYr || (yr === firstYr && mo < firstMo)) continue;
+      if (yr > lastYr  || (yr === lastYr  && mo > lastMo))  continue;
       const pres = recorded[yr]?.[mo] ?? 0;
       const e = dim(yr, mo);
       expected += e;
@@ -1288,8 +1293,13 @@ function loadAnnualChart() {
     return { missing, expected };
   }
 
-  const yrs   = Object.keys(annual).map(Number).sort((a, b) => a - b);
-  const yVals = yrs.map(yr => round1(annual[yr]));
+  function periodHasData(key) {
+    return yearPeriodMonths(key, yearType).some(({ yr, mo }) => (recorded[yr]?.[mo] ?? 0) > 0);
+  }
+
+  const keys   = Object.keys(annual).map(Number).sort((a, b) => a - b);
+  const xLbls  = keys.map(k => labels[k]);
+  const yVals  = keys.map(k => round1(annual[k]));
 
   const CATS = [
     { key: "complete", label: "0 missing days",   color: "#1a6eb5" },
@@ -1298,19 +1308,17 @@ function loadAnnualChart() {
     { key: "nodata",   label: "No data",           color: "#cccccc" },
   ];
 
-  function catKey(yr) {
-    const { missing, expected } = annualMissing(yr);
-    const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
-    if (!hasData) return "nodata";
+  function catKey(k) {
+    const { missing, expected } = annualMissing(k);
+    if (!periodHasData(k)) return "nodata";
     if (!expected || missing === 0) return "complete";
     return (missing / expected) <= 0.05 ? "minor" : "major";
   }
 
-  const missCounts = yrs.map(yr => annualMissing(yr).missing);
-  const hoverTexts = yrs.map((yr, i) => {
+  const missCounts = keys.map(k => annualMissing(k).missing);
+  const hoverTexts = keys.map((k, i) => {
     const m = missCounts[i];
-    const hasData = recorded[yr] && Object.values(recorded[yr]).some(v => v > 0);
-    if (!hasData) return `No data — ${m} days missing`;
+    if (!periodHasData(k)) return `No data — ${m} days missing`;
     const base = `${yVals[i]} mm`;
     return m > 0 ? `${base}<br>Missing: ${m} day${m !== 1 ? "s" : ""}` : base;
   });
@@ -1318,13 +1326,14 @@ function loadAnnualChart() {
 
   // One trace per category so Plotly can render a legend
   const _abg = plotBg();
+  const isWater = yearType !== "cal";
   const traces = CATS.map(cat => ({
-    x: yrs,
-    y: yrs.map((yr, i) => catKey(yr) === cat.key ? yVals[i] : null),
+    x: xLbls,
+    y: keys.map((k, i) => catKey(k) === cat.key ? yVals[i] : null),
     type: "bar",
     name: cat.label,
     marker: { color: cat.color, opacity: 0.85 },
-    text: yrs.map((yr, i) => catKey(yr) === cat.key ? barLabels[i] : ""),
+    text: keys.map((k, i) => catKey(k) === cat.key ? barLabels[i] : ""),
     textposition: "outside",
     textfont: { size: 9, color: "#e74c3c" },
     cliponaxis: false,
@@ -1332,11 +1341,15 @@ function loadAnnualChart() {
     hovertemplate: "<b>%{x}</b><br>%{customdata}<extra></extra>",
   }));
 
+  const xaxis = isWater
+    ? { type: "category", gridcolor: _abg.grid, tickangle: -45, tickfont: { size: 10 } }
+    : { type: "linear", dtick: 10, gridcolor: _abg.grid };
+
   Plotly.react("annual-chart-area", traces, {
-    margin: { t: 10, r: 10, b: 40, l: 60 },
+    margin: { t: 10, r: 10, b: isWater ? 70 : 40, l: 60 },
     paper_bgcolor: _abg.paper, plot_bgcolor: _abg.plot,
     yaxis: { title: "Annual Rainfall (mm)", gridcolor: _abg.grid, zeroline: false, autorange: true },
-    xaxis: { type: "linear", dtick: 10, gridcolor: _abg.grid },
+    xaxis,
     barmode: "overlay",
     showlegend: true,
     legend: { orientation: "h", y: 1.08, x: 0, xanchor: "left", font: { size: 11 } },
@@ -1348,6 +1361,51 @@ function loadAnnualChart() {
 function round1(v) {
   if (v == null) return null;
   return Math.round(v * 10) / 10;
+}
+
+// Returns {key, label} for a date string under a given yearType.
+// key = numeric start-year of the period (for sorting/spacing).
+// label = display string ("2020" for cal, "2020-21" for water years).
+function yearKeyInfo(dateStr, yearType) {
+  const yr = parseInt(dateStr.slice(0, 4));
+  const mo = parseInt(dateStr.slice(5, 7));
+  if (yearType === "jul") {
+    const key = mo >= 7 ? yr : yr - 1;
+    return { key, label: String(key + 1) };
+  }
+  if (yearType === "oct") {
+    const key = mo >= 10 ? yr : yr - 1;
+    return { key, label: String(key + 1) };
+  }
+  return { key: yr, label: String(yr) };
+}
+
+// Returns [{yr, mo}] for every calendar month in the given period key.
+function yearPeriodMonths(key, yearType) {
+  if (yearType === "jul") {
+    const m = [];
+    for (let mo = 7;  mo <= 12; mo++) m.push({ yr: key,     mo });
+    for (let mo = 1;  mo <= 6;  mo++) m.push({ yr: key + 1, mo });
+    return m;
+  }
+  if (yearType === "oct") {
+    const m = [];
+    for (let mo = 10; mo <= 12; mo++) m.push({ yr: key,     mo });
+    for (let mo = 1;  mo <= 9;  mo++) m.push({ yr: key + 1, mo });
+    return m;
+  }
+  return Array.from({ length: 12 }, (_, i) => ({ yr: key, mo: i + 1 }));
+}
+
+// Sets App.yearType and re-renders the current tab (annual or ams only).
+function setYearType(type) {
+  App.yearType = type;
+  ["cal", "jul", "oct"].forEach(t => {
+    document.getElementById(`annual-ytype-${t}`)?.classList.toggle("active", t === type);
+    document.getElementById(`ams-ytype-${t}`)?.classList.toggle("active",    t === type);
+  });
+  if (App.activeTab === "annual") loadAnnualChart();
+  if (App.activeTab === "ams")    loadAMSTab();
 }
 
 // ── Missing Days Tab ──────────────────────────────────────────────────────────
@@ -1453,43 +1511,45 @@ function computeAMS(maxMissing) {
   const data = App.stationData;
   if (!data?.dates?.length) return [];
 
+  const yearType = App.yearType ?? "cal";
   const dim = (yr, mo) => new Date(yr, mo, 0).getDate();
 
   const allMonths = [...new Set(data.dates.map(d => d.slice(0, 7)))].sort();
   const [firstYr, firstMo] = allMonths[0].split("-").map(Number);
   const [lastYr,  lastMo]  = allMonths[allMonths.length - 1].split("-").map(Number);
 
-  const recorded = {};
-  const byYear   = {};
+  const recorded = {};  // "YYYY-MM" -> non-null count
+  const byPeriod = {};  // periodKey -> daily values[]
+  const labels   = {};  // periodKey -> display label
   data.dates.forEach((d, i) => {
-    const yr = parseInt(d.slice(0, 4));
-    const mo = parseInt(d.slice(5, 7));
-    const v  = data.values[i];
-    if (!byYear[yr]) byYear[yr] = [];
-    byYear[yr].push(v);
+    const { key, label } = yearKeyInfo(d, yearType);
+    const v = data.values[i];
+    if (!byPeriod[key]) byPeriod[key] = [];
+    byPeriod[key].push(v);
+    labels[key] = label;
     if (v !== null) {
       const k = d.slice(0, 7);
       recorded[k] = (recorded[k] ?? 0) + 1;
     }
   });
 
-  const years = Object.keys(byYear).map(Number).sort((a, b) => a - b);
+  const periodKeys = Object.keys(byPeriod).map(Number).sort((a, b) => a - b);
   const ams = [];
 
-  for (const yr of years) {
+  for (const key of periodKeys) {
     let missing = 0, expected = 0;
-    for (let mo = 1; mo <= 12; mo++) {
-      if (yr === firstYr && mo < firstMo) continue;
-      if (yr === lastYr  && mo > lastMo)  continue;
-      const pres = recorded[`${yr}-${String(mo).padStart(2,"0")}`] ?? 0;
+    for (const { yr, mo } of yearPeriodMonths(key, yearType)) {
+      if (yr < firstYr || (yr === firstYr && mo < firstMo)) continue;
+      if (yr > lastYr  || (yr === lastYr  && mo > lastMo))  continue;
+      const pres = recorded[`${yr}-${String(mo).padStart(2, "0")}`] ?? 0;
       const e = dim(yr, mo);
       expected += e;
       missing  += Math.max(0, e - pres);
     }
-    const vals = byYear[yr].filter(v => v !== null);
+    const vals = byPeriod[key].filter(v => v !== null);
     if (!vals.length) continue;
     const maxVal = Math.max(...vals);
-    ams.push({ yr, maxVal, missing, excluded: missing > maxMissing });
+    ams.push({ yr: key, label: labels[key], maxVal, missing, excluded: missing > maxMissing });
   }
 
   // Sort by value desc for plotting positions
@@ -1532,9 +1592,9 @@ function loadAMSTab() {
       <tbody>
         ${allRows.map(r => r.excluded
           ? `<tr class="ams-excl" title="${r.missing} missing days — excluded">
-               <td>${r.yr}</td><td>${r.maxVal} ⚠</td>
+               <td>${r.label}</td><td>${r.maxVal} ⚠</td>
              </tr>`
-          : `<tr><td>${r.yr}</td><td>${r.maxVal}</td></tr>`
+          : `<tr><td>${r.label}</td><td>${r.maxVal}</td></tr>`
         ).join("")}
       </tbody>
     </table>`;
@@ -1782,29 +1842,30 @@ function genMonthlyCSV() {
 
 function genAnnualCSV() {
   const data = App.stationData;
+  const yearType = App.yearType ?? "cal";
   const dim  = (yr, mo) => new Date(yr, mo, 0).getDate();
-  const recorded = {}, annual = {};
-  data.dates.forEach((d, i) => {
-    const yr = parseInt(d.slice(0,4)), mo = parseInt(d.slice(5,7));
-    const v  = data.values[i];
-    annual[yr] = (annual[yr] ?? 0) + (v ?? 0);
-    if (v !== null) {
-      const k = d.slice(0,7); recorded[k] = (recorded[k] ?? 0) + 1;
-    }
-  });
-  const allMonths = [...new Set(data.dates.map(d=>d.slice(0,7)))].sort();
+  const recorded = {}, annual = {}, lblMap = {};
+  const allMonths = [...new Set(data.dates.map(d => d.slice(0,7)))].sort();
   const [fy, fm] = allMonths[0].split("-").map(Number);
   const [ly, lm] = allMonths[allMonths.length-1].split("-").map(Number);
+  data.dates.forEach((d, i) => {
+    const { key, label } = yearKeyInfo(d, yearType);
+    const yr = parseInt(d.slice(0,4)), mo = parseInt(d.slice(5,7));
+    const v  = data.values[i];
+    annual[key] = (annual[key] ?? 0) + (v ?? 0);
+    lblMap[key] = label;
+    if (v !== null) { const k = d.slice(0,7); recorded[k] = (recorded[k] ?? 0) + 1; }
+  });
   let csv = "Year,Annual_Total_mm,Missing_days\n";
-  Object.keys(annual).map(Number).sort((a,b)=>a-b).forEach(yr => {
+  Object.keys(annual).map(Number).sort((a,b)=>a-b).forEach(key => {
     let miss=0, exp=0;
-    for (let mo=1;mo<=12;mo++) {
-      if (yr===fy && mo<fm) continue;
-      if (yr===ly && mo>lm) continue;
+    for (const { yr, mo } of yearPeriodMonths(key, yearType)) {
+      if (yr < fy || (yr === fy && mo < fm)) continue;
+      if (yr > ly || (yr === ly && mo > lm)) continue;
       const pres = recorded[`${yr}-${String(mo).padStart(2,"0")}`] ?? 0;
       const e = dim(yr, mo); exp += e; miss += Math.max(0, e-pres);
     }
-    csv += `${yr},${round1(annual[yr])},${miss}\n`;
+    csv += `${lblMap[key]},${round1(annual[key])},${miss}\n`;
   });
   return csv;
 }
@@ -1843,7 +1904,7 @@ function genAMSCSV(thresh) {
   const ams = computeAMS(thresh);
   let csv = "Year,Annual_Max_mm,Rank,ARI_years,AEP,Missing_days,Excluded\n";
   ams.sort((a,b)=>a.yr-b.yr).forEach(r => {
-    csv += `${r.yr},${r.maxVal},${r.rank??''},${r.ari??''},${r.aep??''},${r.missing},${r.excluded?'yes':'no'}\n`;
+    csv += `${r.label},${r.maxVal},${r.rank??''},${r.ari??''},${r.aep??''},${r.missing},${r.excluded?'yes':'no'}\n`;
   });
   return csv;
 }

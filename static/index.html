@@ -239,6 +239,14 @@
 
         <!-- Annual tab -->
         <div class="tab-content" id="tab-annual">
+          <div class="chart-controls">
+            <label>Year type</label>
+            <div class="chart-type-toggle">
+              <button class="active" id="annual-ytype-cal"  onclick="setYearType('cal')">Calendar</button>
+              <button               id="annual-ytype-jul"  onclick="setYearType('jul')">Jul–Jun</button>
+              <button               id="annual-ytype-oct"  onclick="setYearType('oct')">Oct–Sep</button>
+            </div>
+          </div>
           <div class="chart-area" id="annual-chart-area">
             <div class="empty-msg"><div class="big-icon">📆</div>Select a station</div>
           </div>
@@ -254,6 +262,13 @@
         <!-- AMS tab -->
         <div class="tab-content" id="tab-ams">
           <div class="ams-controls">
+            <label>Year type</label>
+            <div class="chart-type-toggle">
+              <button class="active" id="ams-ytype-cal" onclick="setYearType('cal')">Calendar</button>
+              <button               id="ams-ytype-jul" onclick="setYearType('jul')">Jul–Jun</button>
+              <button               id="ams-ytype-oct" onclick="setYearType('oct')">Oct–Sep</button>
+            </div>
+            <span style="width:1px;height:20px;background:var(--border);margin:0 4px"></span>
             <label>Exclude years with &gt;</label>
             <input type="number" id="ams-threshold" value="30" min="0" max="365" step="1">
             <label>missing days</label>
