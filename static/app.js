@@ -384,11 +384,17 @@ window.selectStation = async function(id) {
     document.querySelectorAll(".station-card").forEach(el => {
       el.classList.toggle("selected", el.dataset.id === id);
     });
-    // Pan map and open popup
+    // Pan map, uncluster, and open popup
     if (stn.lat && stn.lon) {
       const marker = App.markers[stn.id];
-      App.map.setView([stn.lat, stn.lon], Math.max(App.map.getZoom(), 11), { animate: true });
-      if (marker) App.map.once("moveend", () => marker.openPopup());
+      if (marker) {
+        App.clusterer.zoomToShowLayer(marker, () => {
+          if (App.map.getZoom() < 13) App.map.setView([stn.lat, stn.lon], 13, { animate: true });
+          marker.openPopup();
+        });
+      } else {
+        App.map.setView([stn.lat, stn.lon], 13, { animate: true });
+      }
     }
   }
 
