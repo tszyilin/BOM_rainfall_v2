@@ -384,17 +384,19 @@ window.selectStation = async function(id) {
     document.querySelectorAll(".station-card").forEach(el => {
       el.classList.toggle("selected", el.dataset.id === id);
     });
-    // Pan map, uncluster, and open popup
+    // Pan map, uncluster, and open popup — delayed so panel open + invalidateSize finish first
     if (stn.lat && stn.lon) {
       const marker = App.markers[stn.id];
-      if (marker) {
-        App.clusterer.zoomToShowLayer(marker, () => {
-          if (App.map.getZoom() < 13) App.map.setView([stn.lat, stn.lon], 13, { animate: true });
-          marker.openPopup();
-        });
-      } else {
-        App.map.setView([stn.lat, stn.lon], 13, { animate: true });
-      }
+      setTimeout(() => {
+        if (marker) {
+          App.clusterer.zoomToShowLayer(marker, () => {
+            if (App.map.getZoom() < 13) App.map.setView([stn.lat, stn.lon], 13);
+            marker.openPopup();
+          });
+        } else {
+          App.map.setView([stn.lat, stn.lon], 13);
+        }
+      }, 350);
     }
   }
 
