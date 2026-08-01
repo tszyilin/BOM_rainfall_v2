@@ -384,18 +384,13 @@ window.selectStation = async function(id) {
     document.querySelectorAll(".station-card").forEach(el => {
       el.classList.toggle("selected", el.dataset.id === id);
     });
-    // Pan map, uncluster, and open popup — delayed so panel open + invalidateSize finish first
+    // Pan to station at zoom 14, then open popup directly on the map
+    // (bypasses cluster ownership so it works regardless of cluster state)
     if (stn.lat && stn.lon) {
       const marker = App.markers[stn.id];
       setTimeout(() => {
-        if (marker) {
-          App.clusterer.zoomToShowLayer(marker, () => {
-            if (App.map.getZoom() < 13) App.map.setView([stn.lat, stn.lon], 13);
-            marker.openPopup();
-          });
-        } else {
-          App.map.setView([stn.lat, stn.lon], 13);
-        }
+        App.map.setView([stn.lat, stn.lon], Math.max(App.map.getZoom(), 14), { animate: true });
+        if (marker) App.map.once("moveend", () => marker.getPopup()?.openOn(App.map));
       }, 350);
     }
   }
