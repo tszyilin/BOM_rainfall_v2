@@ -6,14 +6,22 @@ Run:  uvicorn api:app --reload --port 8000
 from __future__ import annotations
 import io
 import json
+import logging
 import math
+import os
 import re
 import time
 import zipfile
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 import concurrent.futures
 from typing import List, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 import numpy as np
 import pandas as pd
@@ -47,6 +55,24 @@ _POSTCODE_URL = (
     "https://raw.githubusercontent.com/matthewproctor/"
     "australianpostcodes/master/australian_postcodes.csv"
 )
+
+# ── SILO constants ────────────────────────────────────────────────────────────
+# SILO PatchedPointDataset (Queensland Government, Long Paddock).
+# Requires an email address as the `username` query param — set SILO_EMAIL to
+# your own address. `password=apirequest` is the public convention.
+SILO_EMAIL    = os.environ.get("SILO_EMAIL", "apirequest@example.com")
+SILO_PASSWORD = "apirequest"
+SILO_URL      = "https://www.longpaddock.qld.gov.au/cgi-bin/silo/PatchedPointDataset.php"
+# daily_rain source codes to keep (observed only; drop interpolated/gridded):
+#   0  = raw gauge observation
+#   25 = deaccumulated multi-day gauge reading
+SILO_KEEP_SRN = {0, 25}
+
+if SILO_EMAIL == "apirequest@example.com":
+    logging.getLogger("uvicorn").warning(
+        "SILO_EMAIL is unset — using placeholder. Set env SILO_EMAIL=<your@email> "
+        "to avoid SILO rejecting requests."
+    )
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -337,76 +363,144 @@ def nearby_stations(
     return result
 
 
-# ── BOM scrape helpers ─────────────────────────────────────────────────────────
+# ── SILO fetch helpers ────────────────────────────────────────────────────────
 class _NoDataError(Exception):
-    """Raised when BOM permanently has no rainfall data for a station (don't retry)."""
+    """Raised when a station permanently has no observed rainfall data (don't retry)."""
 
 
-def _make_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    s.get("https://www.bom.gov.au/climate/data/", timeout=15)
-    return s
+def _today_brisbane_yyyymmdd() -> str:
+    """Today in Australia/Brisbane as YYYYMMDD (avoids UTC-clock off-by-one)."""
+    from datetime import datetime
+    if ZoneInfo is not None:
+        return datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y%m%d")
+    return date.today().strftime("%Y%m%d")
 
 
-def _strip_tags(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s).replace("&deg;", "°").replace("&nbsp;", " ").strip()
+def _silo_fetch_csv(station_id: str, start: str, finish: str) -> pd.DataFrame:
+    """Fetch SILO PatchedPointDataset rainfall CSV as a raw DataFrame.
+
+    SILO response header: station,YYYY-MM-DD,daily_rain,daily_rain_source,metadata
+    """
+    params = {
+        "format":   "csv",
+        "station":  int(station_id),
+        "start":    start,
+        "finish":   finish,
+        "username": SILO_EMAIL,
+        "password": SILO_PASSWORD,
+        "comment":  "R",
+    }
+    resp = requests.get(SILO_URL, params=params, timeout=60)
+    resp.raise_for_status()
+    body = resp.text
+
+    # SILO returns 200 with a plain-text error message when the station is unknown.
+    if body.lstrip().lower().startswith(("invalid station", "sorry")):
+        raise _NoDataError(body.strip().splitlines()[0])
+
+    df = pd.read_csv(io.StringIO(body))
+    if df.empty or "daily_rain" not in df.columns:
+        raise _NoDataError(
+            f"Station {station_id} returned no rainfall from SILO PatchedPointDataset."
+        )
+    return df
 
 
-def _parse_station_info(html: str) -> dict:
-    plain = re.sub(r"<[^>]+>", " ", html)
-    plain = plain.replace("&deg;", "°").replace("&nbsp;", " ").replace("&amp;", "&")
-    plain = re.sub(r"\s+", " ", plain)
+def _silo_parse_metadata(raw: pd.DataFrame) -> dict:
+    """Extract SILO's embedded per-station metadata from the `metadata` column.
 
-    anchor = re.search(r"Number:\s*\d+", plain, re.IGNORECASE)
-    if not anchor:
-        block = plain
-    else:
-        start = max(0, anchor.start() - 300)
-        end   = min(len(plain), anchor.end() + 600)
-        block = plain[start:end]
+    SILO stuffs key=value strings into the first ~8 rows' metadata column
+    (name, latitude, longitude, elevation, reference, extracted, dataset).
+    """
+    out: dict = {}
+    if "metadata" not in raw.columns:
+        return out
+    for cell in raw["metadata"].dropna().astype(str):
+        cell = cell.strip().strip('"')
+        if "=" not in cell:
+            continue
+        k, _, v = cell.partition("=")
+        out[k.strip().lower()] = v.strip()
+    return out
 
-    STOP = r"(?=\s*(?:Number|Opened|Now|Lat|Lon|Elevation|Station|Details)\s*:)"
 
-    def field(label, default="N/A"):
-        m = re.search(rf"{label}\s*:\s*(.*?){STOP}", block, re.IGNORECASE)
-        return m.group(1).strip() if m else default
+def _silo_to_bom_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Translate SILO CSV to the BOM-CSV-shaped DataFrame the rest of the app expects.
 
-    name   = field("Station")
-    number = field("Number")
-    opened = field("Opened")
-    now    = field("Now")
-    lat    = field("Lat")
-    lon    = field("Lon")
-    elev_m = re.search(r"Elevation\s*:\s*([\d.]+)\s*m", block, re.IGNORECASE)
-    elev   = elev_m.group(1) if elev_m else "N/A"
-    is_open = ("closed" not in now.lower()) if now != "N/A" else None
+    Filters rows to `SILO_KEEP_SRN` (observed only; drops interpolated/gridded).
+    Omits the Period column intentionally — the downstream `distribute` step
+    then becomes a no-op, which is the intended behaviour for observed-only data.
+    """
+    if "daily_rain_source" not in raw.columns:
+        raise RuntimeError(
+            "SILO response missing 'daily_rain_source' column — schema may have changed."
+        )
 
-    def _parse_coord(s, neg_dir):
-        if not s or s == "N/A":
-            return None
-        num = re.search(r"[\d.]+", s)
-        if not num:
-            return None
-        val = float(num.group())
-        if neg_dir.upper() in s.upper():
-            val = -val
-        return val
+    keep = pd.to_numeric(raw["daily_rain_source"], errors="coerce").isin(SILO_KEEP_SRN)
+    kept = raw.loc[keep].copy()
 
-    lat_f = _parse_coord(lat, "S")
-    lon_f = _parse_coord(lon, "W")
+    dates = pd.to_datetime(kept["YYYY-MM-DD"], errors="coerce", format="%Y-%m-%d")
+    kept  = kept.assign(_date=dates).dropna(subset=["_date"])
+
+    return pd.DataFrame({
+        "Year":  kept["_date"].dt.year.astype(int),
+        "Month": kept["_date"].dt.month.astype(int),
+        "Day":   kept["_date"].dt.day.astype(int),
+        "Rainfall amount (millimetres)": pd.to_numeric(kept["daily_rain"], errors="coerce"),
+        "Quality": "Y",
+    }).reset_index(drop=True)
+
+
+@lru_cache(maxsize=1)
+def _station_index_by_id() -> dict:
+    """Shapefile station rows keyed by 6-digit station id."""
+    return {s["id"]: s for s in _station_index()}
+
+
+def _silo_station_info(station_id: str, meta: dict) -> dict:
+    """Compose the `info` dict downstream code reads.
+
+    Merges the shapefile row (start_year/end_year/name/lat/lon) with SILO's
+    embedded metadata (elevation, and higher-precision lat/lon).
+    """
+    shp = _station_index_by_id().get(station_id, {})
+
+    def _fnum(s):
+        m = re.search(r"-?[\d.]+", s or "")
+        return float(m.group()) if m else None
+
+    silo_lat = _fnum(meta.get("latitude"))
+    silo_lon = _fnum(meta.get("longitude"))
+    silo_elev = _fnum(meta.get("elevation"))
+
+    name = (meta.get("name") or shp.get("name") or station_id).strip()
+    lat  = silo_lat if silo_lat is not None else shp.get("lat")
+    lon  = silo_lon if silo_lon is not None else shp.get("lon")
+
+    start_year = shp.get("start_year")
+    end_year   = shp.get("end_year")
+    this_year  = date.today().year
+    is_open = (end_year is None) or (end_year >= this_year - 1)
+
+    opened = str(start_year) if start_year else "N/A"
+    now    = "Open" if is_open else (str(end_year) if end_year else "N/A")
+
+    def _coord_str(v, pos, neg):
+        if v is None:
+            return "N/A"
+        return f"{abs(v):.4f}°{pos if v >= 0 else neg}"
 
     return {
-        "name":    name,
-        "number":  number,
-        "lat":     lat_f,
-        "lon":     lon_f,
-        "lat_str": lat,
-        "lon_str": lon,
-        "opened":  opened,
-        "now":     now,
-        "is_open": is_open,
-        "elevation": elev,
+        "name":      name,
+        "number":    station_id,
+        "lat":       lat,
+        "lon":       lon,
+        "lat_str":   _coord_str(lat, "N", "S"),
+        "lon_str":   _coord_str(lon, "E", "W"),
+        "opened":    opened,
+        "now":       now,
+        "is_open":   is_open,
+        "elevation": f"{silo_elev:.1f}" if silo_elev is not None else "N/A",
     }
 
 
@@ -415,84 +509,48 @@ _station_data_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 
 
 def _fetch_rainfall_cached(station_id: str) -> dict:
-    """Scrape BOM and return parsed station data. Cached 1 hour per station."""
+    """Fetch daily rainfall from SILO PatchedPointDataset. Cached 1 hour per station.
+
+    Observed-only: keeps SILO source codes 0 (raw gauge) and 25 (deaccumulated
+    multi-day gauge). Interpolated/gridded synthetic values are dropped.
+    """
+    station_id = station_id.strip().zfill(6)
+    if not station_id.isdigit():
+        raise RuntimeError(f"Invalid station id: {station_id!r}")
+
     if station_id in _station_data_cache:
         return _station_data_cache[station_id]
 
-    station_id = station_id.strip().zfill(6)
-    last_exc = None
+    shp = _station_index_by_id().get(station_id, {})
+    start_year = shp.get("start_year") or 1889
+    start = f"{max(int(start_year), 1889):04d}0101"
+    finish = _today_brisbane_yyyymmdd()
 
+    last_exc = None
     for attempt in range(3):
         if attempt > 0:
             time.sleep(1.5)
         try:
-            session = _make_session()
-
-            # Step 1: get page to find p_c and start_year
-            page_url = (
-                f"https://www.bom.gov.au/jsp/ncc/cdio/weatherData/av"
-                f"?p_nccObsCode={OBS_CODE}&p_display_type=dailyDataFile"
-                f"&p_startYear=&p_c=&p_stn_num={station_id}"
-            )
-            resp = session.get(page_url, timeout=30)
-            resp.raise_for_status()
-            page_html = resp.text
-
-            # BOM returns an "No data available" page for stations without rainfall records
-            if "No data available" in page_html or "Error code: 1001" in page_html:
+            raw  = _silo_fetch_csv(station_id, start, finish)
+            df   = _silo_to_bom_frame(raw)
+            if df.empty:
                 raise _NoDataError(
-                    f"Station {station_id} has no daily rainfall data in BOM Climate Data Online. "
-                    "It may measure a different parameter (temperature, evaporation, etc.)."
+                    f"Station {station_id} has no observed rainfall in SILO PatchedPointDataset "
+                    "(only interpolated/gridded values were returned)."
                 )
-
-            match = re.search(
-                r"p_display_type=dailyZippedDataFile&amp;p_stn_num=\d+&amp;p_c=(-?\d+)"
-                r"&amp;p_nccObsCode=\d+&amp;p_startYear=(\d+)",
-                page_html,
-            )
-            if not match:
-                raise _NoDataError(
-                    f"Station {station_id} does not have a daily rainfall download available on BOM."
-                )
-
-            p_c, start_year = match.group(1), match.group(2)
-            download_url = (
-                f"https://www.bom.gov.au/jsp/ncc/cdio/weatherData/av"
-                f"?p_display_type=dailyZippedDataFile&p_stn_num={station_id}"
-                f"&p_c={p_c}&p_nccObsCode={OBS_CODE}&p_startYear={start_year}"
-            )
-
-            # Step 2: download zip
-            resp2 = session.get(download_url, timeout=60)
-            resp2.raise_for_status()
-
-            content_type = resp2.headers.get("Content-Type", "")
-            if "html" in content_type:
-                raise RuntimeError("BOM returned HTML instead of a zip — session may have expired.")
-
-            # Step 3: parse CSV from zip
-            with zipfile.ZipFile(io.BytesIO(resp2.content)) as z:
-                csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-                if not csv_files:
-                    raise RuntimeError("No CSV found in downloaded zip.")
-                with z.open(csv_files[0]) as f:
-                    df = pd.read_csv(f)
-
-            station_info = _parse_station_info(page_html)
-
-            result = {"df": df, "info": station_info}
+            info = _silo_station_info(station_id, _silo_parse_metadata(raw))
+            result = {"df": df, "info": info}
             _station_data_cache[station_id] = result
             return result
 
         except _NoDataError:
-            raise  # permanent — don't retry, bubble up immediately
-        except (zipfile.BadZipFile, RuntimeError) as e:
+            raise
+        except (requests.RequestException, RuntimeError) as e:
             last_exc = e
             continue
 
     raise RuntimeError(
-        f"BOM did not return valid data after 3 attempts. "
-        f"Last error: {last_exc}"
+        f"SILO did not return valid data after 3 attempts. Last error: {last_exc}"
     )
 
 
@@ -503,14 +561,15 @@ def station_data(
     distribute: bool = Query(True, description="Distribute accumulated readings"),
 ):
     station_id = station_id.strip().zfill(6)
+    import traceback as _tb
     try:
         cached = _fetch_rainfall_cached(station_id)
     except _NoDataError as e:
         raise HTTPException(404, str(e))
     except RuntimeError as e:
         raise HTTPException(400, str(e))
-
-    import traceback as _tb
+    except Exception:
+        raise HTTPException(502, f"Failed to fetch station data from BOM:\n{_tb.format_exc()}")
     try:
         df   = cached["df"].copy()
         info = cached["info"]
